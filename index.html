@@ -6,12 +6,10 @@
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <title>时光足迹 - 网页 App</title>
-    <!-- 引入 React 和 Tailwind (CDN 方式，无需本地环境) -->
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 引入 Lucide 图标库 -->
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
@@ -24,7 +22,34 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect } = React;
+        const { useState, useEffect, useRef } = React;
+
+        // =========================================================
+        // ⚙️ 云端 API 地址 - 你的阿里云函数计算地址
+        // =========================================================
+        const API_BASE = 'https://timetracker-api-chfnsbnnlv.cn-beijing.fcapp.run';
+
+        // 云同步工具函数
+        const api = {
+            getTags: async () => {
+                const res = await fetch(`${API_BASE}/tags`);
+                return res.json();
+            },
+            saveTags: async (tags) => {
+                await fetch(`${API_BASE}/tags`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tags }),
+                });
+            },
+            saveLog: async (log) => {
+                await fetch(`${API_BASE}/logs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ log }),
+                });
+            },
+        };
 
         const App = () => {
             const [state, setState] = useState({
@@ -40,25 +65,48 @@
             const [showResetModal, setShowResetModal] = useState(false);
             const [showEditModal, setShowEditModal] = useState(false);
             const [editingIndex, setEditingIndex] = useState(null);
-            const [newTag, setNewTag] = useState("");
             const [currentTime, setCurrentTime] = useState(Date.now());
-            const [wakeLock, setWakeLock] = useState(null);
             const [toast, setToast] = useState({ show: false, message: "" });
+            const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | ok | error
+            const tagsRef = useRef(state.tags);
 
+            // 启动时：读取本地数据，再从云端拉取最新标签
             useEffect(() => {
                 const saved = localStorage.getItem('timetracker_github_v1');
-                if (saved) setState(JSON.parse(saved));
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    setState(parsed);
+                    tagsRef.current = parsed.tags;
+                }
                 const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
+
+                // 从云端拉取标签（覆盖本地）
+                setSyncStatus('syncing');
+                api.getTags()
+                    .then(data => {
+                        if (data.tags && data.tags.length > 0) {
+                            setState(prev => ({ ...prev, tags: data.tags }));
+                            tagsRef.current = data.tags;
+                        }
+                        setSyncStatus('ok');
+                        setTimeout(() => setSyncStatus('idle'), 2000);
+                    })
+                    .catch(() => {
+                        setSyncStatus('error');
+                        setTimeout(() => setSyncStatus('idle'), 3000);
+                    });
+
                 return () => clearInterval(timer);
             }, []);
 
+            // 本地持久化
             useEffect(() => {
                 localStorage.setItem('timetracker_github_v1', JSON.stringify(state));
             }, [state]);
 
             const showToast = (msg) => {
                 setToast({ show: true, message: msg });
-                setTimeout(() => setToast({ show: false, message: "" }), 2000);
+                setTimeout(() => setToast({ show: false, message: "" }), 2500);
             };
 
             const formatDuration = (ms) => {
@@ -79,15 +127,48 @@
             const markMoment = () => {
                 const now = Date.now();
                 const durationMs = now - state.lastMarkTime;
-                const newLog = { start: state.lastMarkTime, end: now, durationMs, durationStr: formatDuration(durationMs), tag: state.selectedTag };
+                const newLog = {
+                    start: state.lastMarkTime,
+                    end: now,
+                    durationMs,
+                    durationStr: formatDuration(durationMs),
+                    tag: state.selectedTag
+                };
                 setState(prev => ({ ...prev, lastMarkTime: now, logs: [...prev.logs, newLog] }));
-                showToast(`记录: ${state.selectedTag}`);
+                showToast(`📍 已记录: ${state.selectedTag}`);
+
+                // 云端同步日志
+                setSyncStatus('syncing');
+                api.saveLog(newLog)
+                    .then(() => {
+                        setSyncStatus('ok');
+                        setTimeout(() => setSyncStatus('idle'), 1500);
+                    })
+                    .catch(() => {
+                        setSyncStatus('error');
+                        setTimeout(() => setSyncStatus('idle'), 3000);
+                    });
             };
 
             const handleFinalReset = () => {
                 setState(prev => ({ ...prev, isStarted: false, startTime: null, lastMarkTime: null, logs: [] }));
                 setShowResetModal(false);
                 showToast("✅ 已结算重置");
+            };
+
+            // 标签变更后同步到云端
+            const updateTags = (newTags) => {
+                setState(s => ({ ...s, tags: newTags }));
+                setSyncStatus('syncing');
+                api.saveTags(newTags)
+                    .then(() => {
+                        setSyncStatus('ok');
+                        setTimeout(() => setSyncStatus('idle'), 1500);
+                    })
+                    .catch(() => {
+                        setSyncStatus('error');
+                        setTimeout(() => setSyncStatus('idle'), 3000);
+                    });
             };
 
             const exportCSV = () => {
@@ -100,8 +181,26 @@
                 a.click();
             };
 
+            // 云同步状态指示器
+            const SyncIndicator = () => {
+                if (syncStatus === 'idle') return null;
+                const configs = {
+                    syncing: { color: 'bg-blue-500', text: '☁️ 同步中...' },
+                    ok:      { color: 'bg-green-500', text: '✓ 已同步' },
+                    error:   { color: 'bg-orange-400', text: '📶 离线，已本地保存' },
+                };
+                const c = configs[syncStatus];
+                return (
+                    <div className={`fixed top-4 left-1/2 -translate-x-1/2 ${c.color} text-white px-4 py-1.5 rounded-full text-[10px] font-bold z-[120] shadow-lg`}>
+                        {c.text}
+                    </div>
+                );
+            };
+
             return (
                 <div className="min-h-screen pb-32">
+                    <SyncIndicator />
+
                     {/* Header */}
                     <div className="p-4 flex justify-between items-center max-w-md mx-auto">
                         <div>
@@ -128,7 +227,7 @@
                         {!state.isStarted ? (
                             <button onClick={startDay} className="w-full py-8 bg-indigo-600 text-white rounded-[2rem] text-xl font-black shadow-xl active-scale">☀️ 开启新的一天</button>
                         ) : (
-                            <div className="space-y-8 animate-in fade-in duration-500">
+                            <div className="space-y-8">
                                 <div className="space-y-4">
                                     <div className="flex justify-between items-center px-1">
                                         <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">选择标签</h2>
@@ -136,51 +235,61 @@
                                     </div>
                                     <div className="flex flex-wrap gap-2">
                                         {state.tags.map(tag => (
-                                            <button key={tag} onClick={() => setState(s => ({...s, selectedTag: tag}))} className={`px-5 py-3 rounded-2xl text-xs font-bold transition-all active-scale ${state.selectedTag === tag ? 'bg-indigo-600 text-white shadow-lg ring-4 ring-indigo-100' : 'bg-white text-slate-500 border border-slate-200'}`}>{tag}</button>
+                                            <button key={tag} onClick={() => setState(s => ({...s, selectedTag: tag}))}
+                                                className={`px-5 py-3 rounded-2xl text-xs font-bold transition-all active-scale ${state.selectedTag === tag ? 'bg-indigo-600 text-white shadow-lg ring-4 ring-indigo-100' : 'bg-white text-slate-500 border border-slate-200'}`}>
+                                                {tag}
+                                            </button>
                                         ))}
                                     </div>
                                 </div>
                                 <button onClick={markMoment} className="w-full py-10 bg-slate-900 text-white rounded-[2.5rem] text-xl font-black shadow-2xl active-scale flex flex-col items-center">
                                     <span>📍 记录并开始下一段</span>
-                                    <span className="text-[10px] font-medium text-slate-400">标记为: {state.selectedTag}</span>
+                                    <span className="text-[10px] font-medium text-slate-400 mt-1">标记为: {state.selectedTag}</span>
                                 </button>
                             </div>
                         )}
 
                         {/* Logs */}
                         <div className="space-y-4">
-                            <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">今日记录 (点击修改)</h2>
+                            <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">今日记录 (点击标签可修改)</h2>
                             <div className="space-y-3">
-                                {state.logs.length === 0 ? <div className="text-center py-10 text-slate-400 text-xs font-bold border-2 border-dashed border-slate-200 rounded-3xl">暂无记录</div> : 
-                                [...state.logs].reverse().map((log, idx) => {
-                                    const realIdx = state.logs.length - 1 - idx;
-                                    return (
-                                        <div key={idx} className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex justify-between items-center">
-                                            <div className="space-y-1">
-                                                <div className="flex items-center gap-2">
-                                                    <span onClick={() => { setEditingIndex(realIdx); setShowEditModal(true); }} className="px-2 py-1 bg-indigo-50 text-indigo-600 text-[9px] font-black rounded-lg border border-indigo-100 cursor-pointer">{log.tag} ✎</span>
-                                                    <span className="text-[10px] text-slate-300 font-mono">{formatTime(log.start)} - {formatTime(log.end)}</span>
+                                {state.logs.length === 0
+                                    ? <div className="text-center py-10 text-slate-400 text-xs font-bold border-2 border-dashed border-slate-200 rounded-3xl">暂无记录</div>
+                                    : [...state.logs].reverse().map((log, idx) => {
+                                        const realIdx = state.logs.length - 1 - idx;
+                                        return (
+                                            <div key={idx} className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex justify-between items-center">
+                                                <div className="space-y-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span onClick={() => { setEditingIndex(realIdx); setShowEditModal(true); }}
+                                                            className="px-2 py-1 bg-indigo-50 text-indigo-600 text-[9px] font-black rounded-lg border border-indigo-100 cursor-pointer">
+                                                            {log.tag} ✎
+                                                        </span>
+                                                        <span className="text-[10px] text-slate-300 font-mono">{formatTime(log.start)} - {formatTime(log.end)}</span>
+                                                    </div>
+                                                    <p className="text-xl font-black text-slate-800">{log.durationStr}</p>
                                                 </div>
-                                                <p className="text-xl font-black text-slate-800">{log.durationStr}</p>
+                                                <button onClick={() => { if(confirm("删除记录？")) setState(s => ({...s, logs: s.logs.filter((_, i) => i !== realIdx)})) }}
+                                                    className="p-2 text-slate-200 hover:text-red-400">✕</button>
                                             </div>
-                                            <button onClick={() => { if(confirm("删除记录？")) setState(s => ({...s, logs: s.logs.filter((_, i) => i !== realIdx)})) }} className="p-2 text-slate-200 hover:text-red-400">✕</button>
-                                        </div>
-                                    );
-                                })}
+                                        );
+                                    })
+                                }
                             </div>
                         </div>
                     </div>
 
-                    {/* Footer Export */}
+                    {/* Footer */}
                     <div className="fixed bottom-6 left-4 right-4 max-w-md mx-auto glass p-2 rounded-2xl shadow-2xl flex gap-2 z-40">
                         <button onClick={exportCSV} className="w-full py-3 bg-slate-900 text-white text-xs font-bold rounded-xl active-scale">导出 Excel (CSV) 备份数据</button>
                     </div>
 
-                    {/* Modals 简写省略部分逻辑以节省空间，功能完整 */}
+                    {/* 结算弹窗 */}
                     {showResetModal && (
                         <div className="fixed inset-0 bg-slate-900/80 flex items-center justify-center p-6 z-[100] backdrop-blur-md">
                             <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 space-y-6">
                                 <h3 className="text-xl font-black text-center">结算并重置今日？</h3>
+                                <p className="text-xs text-slate-400 text-center">今日数据已保存在云端，重置后可随时导出</p>
                                 <div className="flex flex-col gap-2">
                                     <button onClick={handleFinalReset} className="w-full py-4 bg-red-500 text-white rounded-2xl font-black active-scale">确认结算并重置</button>
                                     <button onClick={() => setShowResetModal(false)} className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button>
@@ -189,48 +298,65 @@
                         </div>
                     )}
 
+                    {/* 标签管理弹窗 */}
                     {showTagModal && (
                         <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-6 z-50 backdrop-blur-md">
                             <div className="bg-white rounded-[2rem] w-full max-w-sm p-8 space-y-4">
-                                <h3 className="text-xl font-black">标签管理</h3>
+                                <div className="flex justify-between items-center">
+                                    <h3 className="text-xl font-black">标签管理</h3>
+                                    <span className="text-[10px] text-indigo-400 font-bold">☁️ 自动同步云端</span>
+                                </div>
                                 <div className="flex gap-2">
-                                    <input type="text" id="tagInput" placeholder="新标签..." className="flex-1 px-4 py-3 bg-slate-100 rounded-xl outline-none" />
+                                    <input type="text" id="tagInput" placeholder="新标签名称..." className="flex-1 px-4 py-3 bg-slate-100 rounded-xl outline-none text-sm" />
                                     <button onClick={() => {
-                                        const val = document.getElementById('tagInput').value;
-                                        if(val) { setState(s => ({...s, tags: [...s.tags, val]})); document.getElementById('tagInput').value = ""; }
-                                    }} className="bg-indigo-600 text-white px-5 rounded-xl font-bold">添加</button>
+                                        const val = document.getElementById('tagInput').value.trim();
+                                        if (val && !state.tags.includes(val)) {
+                                            const newTags = [...state.tags, val];
+                                            updateTags(newTags);
+                                            document.getElementById('tagInput').value = "";
+                                        }
+                                    }} className="bg-indigo-600 text-white px-5 rounded-xl font-bold text-sm">添加</button>
                                 </div>
                                 <div className="max-h-60 overflow-y-auto space-y-2">
                                     {state.tags.map((tag, idx) => (
                                         <div key={idx} className="flex justify-between items-center p-4 bg-slate-50 rounded-xl">
-                                            <span>{tag}</span>
-                                            <button className="text-red-500 text-xs" onClick={() => setState(s => ({...s, tags: s.tags.filter((_, i) => i !== idx)}))}>删除</button>
+                                            <span className="text-sm font-medium">{tag}</span>
+                                            <button className="text-red-400 text-xs font-bold" onClick={() => {
+                                                const newTags = state.tags.filter((_, i) => i !== idx);
+                                                updateTags(newTags);
+                                            }}>删除</button>
                                         </div>
                                     ))}
                                 </div>
-                                <button onClick={() => setShowTagModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-black">关闭</button>
+                                <button onClick={() => setShowTagModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-black text-slate-600">关闭</button>
                             </div>
                         </div>
                     )}
 
+                    {/* 修改标签弹窗 */}
                     {showEditModal && (
                         <div className="fixed inset-0 bg-slate-900/80 flex items-end justify-center z-[60] backdrop-blur-sm">
-                            <div className="bg-white rounded-t-[2.5rem] w-full max-w-sm p-8 space-y-6 animate-in slide-in-from-bottom">
+                            <div className="bg-white rounded-t-[2.5rem] w-full max-w-sm p-8 space-y-6">
                                 <h3 className="text-xl font-black">修改标签</h3>
                                 <div className="grid grid-cols-2 gap-3 max-h-72 overflow-y-auto">
                                     {state.tags.map(tag => (
                                         <button key={tag} onClick={() => {
-                                            const newLogs = [...state.logs]; newLogs[editingIndex].tag = tag;
-                                            setState(s => ({...s, logs: newLogs})); setShowEditModal(false);
+                                            const newLogs = [...state.logs];
+                                            newLogs[editingIndex].tag = tag;
+                                            setState(s => ({...s, logs: newLogs}));
+                                            setShowEditModal(false);
                                         }} className="px-4 py-4 bg-slate-50 rounded-2xl text-sm font-black border active-scale">{tag}</button>
                                     ))}
                                 </div>
-                                <button onClick={() => setShowEditModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-bold">取消</button>
+                                <button onClick={() => setShowEditModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-bold text-slate-600">取消</button>
                             </div>
                         </div>
                     )}
 
-                    <div className={`fixed top-8 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full text-xs font-bold transition-all z-[110] ${toast.show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>{toast.message}</div>
+                    {/* Toast 提示 */}
+                    <div className={`fixed bottom-28 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full text-xs font-bold transition-all z-[110] whitespace-nowrap ${toast.show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                        {toast.message}
+                    </div>
                 </div>
             );
         };
