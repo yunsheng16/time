@@ -22,34 +22,9 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+        const { useState, useEffect } = React;
 
-        // =========================================================
-        // ⚙️ 云端 API 地址 - 你的阿里云函数计算地址
-        // =========================================================
         const API_BASE = 'https://timetracker-api-chfnsbnnlv.cn-beijing.fcapp.run';
-
-        // 云同步工具函数
-        const api = {
-            getTags: async () => {
-                const res = await fetch(`${API_BASE}/tags`);
-                return res.json();
-            },
-            saveTags: async (tags) => {
-                await fetch(`${API_BASE}/tags`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ tags }),
-                });
-            },
-            saveLog: async (log) => {
-                await fetch(`${API_BASE}/logs`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ log }),
-                });
-            },
-        };
 
         const App = () => {
             const [state, setState] = useState({
@@ -64,42 +39,23 @@
             const [showTagModal, setShowTagModal] = useState(false);
             const [showResetModal, setShowResetModal] = useState(false);
             const [showEditModal, setShowEditModal] = useState(false);
+            const [showSyncModal, setShowSyncModal] = useState(false);
             const [editingIndex, setEditingIndex] = useState(null);
             const [currentTime, setCurrentTime] = useState(Date.now());
             const [toast, setToast] = useState({ show: false, message: "" });
-            const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | ok | error
-            const tagsRef = useRef(state.tags);
+            const [syncing, setSyncing] = useState(false);
+            const [lastSyncTime, setLastSyncTime] = useState(null);
 
-            // 启动时：读取本地数据，再从云端拉取最新标签
+            // 启动时只读本地，不自动连云端
             useEffect(() => {
                 const saved = localStorage.getItem('timetracker_github_v1');
-                if (saved) {
-                    const parsed = JSON.parse(saved);
-                    setState(parsed);
-                    tagsRef.current = parsed.tags;
-                }
+                if (saved) setState(JSON.parse(saved));
+                const lastSync = localStorage.getItem('timetracker_last_sync');
+                if (lastSync) setLastSyncTime(lastSync);
                 const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
-
-                // 从云端拉取标签（覆盖本地）
-                setSyncStatus('syncing');
-                api.getTags()
-                    .then(data => {
-                        if (data.tags && data.tags.length > 0) {
-                            setState(prev => ({ ...prev, tags: data.tags }));
-                            tagsRef.current = data.tags;
-                        }
-                        setSyncStatus('ok');
-                        setTimeout(() => setSyncStatus('idle'), 2000);
-                    })
-                    .catch(() => {
-                        setSyncStatus('error');
-                        setTimeout(() => setSyncStatus('idle'), 3000);
-                    });
-
                 return () => clearInterval(timer);
             }, []);
 
-            // 本地持久化
             useEffect(() => {
                 localStorage.setItem('timetracker_github_v1', JSON.stringify(state));
             }, [state]);
@@ -136,18 +92,6 @@
                 };
                 setState(prev => ({ ...prev, lastMarkTime: now, logs: [...prev.logs, newLog] }));
                 showToast(`📍 已记录: ${state.selectedTag}`);
-
-                // 云端同步日志
-                setSyncStatus('syncing');
-                api.saveLog(newLog)
-                    .then(() => {
-                        setSyncStatus('ok');
-                        setTimeout(() => setSyncStatus('idle'), 1500);
-                    })
-                    .catch(() => {
-                        setSyncStatus('error');
-                        setTimeout(() => setSyncStatus('idle'), 3000);
-                    });
             };
 
             const handleFinalReset = () => {
@@ -156,19 +100,33 @@
                 showToast("✅ 已结算重置");
             };
 
-            // 标签变更后同步到云端
-            const updateTags = (newTags) => {
-                setState(s => ({ ...s, tags: newTags }));
-                setSyncStatus('syncing');
-                api.saveTags(newTags)
-                    .then(() => {
-                        setSyncStatus('ok');
-                        setTimeout(() => setSyncStatus('idle'), 1500);
-                    })
-                    .catch(() => {
-                        setSyncStatus('error');
-                        setTimeout(() => setSyncStatus('idle'), 3000);
+            // 手动同步：一次性上传所有数据
+            const handleManualSync = async () => {
+                setSyncing(true);
+                try {
+                    // 上传标签
+                    await fetch(`${API_BASE}/tags`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tags: state.tags }),
                     });
+                    // 逐条上传日志
+                    for (const log of state.logs) {
+                        await fetch(`${API_BASE}/logs`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ log }),
+                        });
+                    }
+                    const now = new Date().toLocaleString('zh-CN');
+                    setLastSyncTime(now);
+                    localStorage.setItem('timetracker_last_sync', now);
+                    showToast(`☁️ 同步成功！${state.logs.length} 条记录已备份`);
+                } catch (e) {
+                    showToast('❌ 同步失败，请检查网络');
+                }
+                setSyncing(false);
+                setShowSyncModal(false);
             };
 
             const exportCSV = () => {
@@ -181,25 +139,8 @@
                 a.click();
             };
 
-            // 云同步状态指示器
-            const SyncIndicator = () => {
-                if (syncStatus === 'idle') return null;
-                const configs = {
-                    syncing: { color: 'bg-blue-500', text: '☁️ 同步中...' },
-                    ok:      { color: 'bg-green-500', text: '✓ 已同步' },
-                    error:   { color: 'bg-orange-400', text: '📶 离线，已本地保存' },
-                };
-                const c = configs[syncStatus];
-                return (
-                    <div className={`fixed top-4 left-1/2 -translate-x-1/2 ${c.color} text-white px-4 py-1.5 rounded-full text-[10px] font-bold z-[120] shadow-lg`}>
-                        {c.text}
-                    </div>
-                );
-            };
-
             return (
-                <div className="min-h-screen pb-32">
-                    <SyncIndicator />
+                <div className="min-h-screen pb-36">
 
                     {/* Header */}
                     <div className="p-4 flex justify-between items-center max-w-md mx-auto">
@@ -279,17 +220,49 @@
                         </div>
                     </div>
 
-                    {/* Footer */}
+                    {/* Footer - 两个按钮 */}
                     <div className="fixed bottom-6 left-4 right-4 max-w-md mx-auto glass p-2 rounded-2xl shadow-2xl flex gap-2 z-40">
-                        <button onClick={exportCSV} className="w-full py-3 bg-slate-900 text-white text-xs font-bold rounded-xl active-scale">导出 Excel (CSV) 备份数据</button>
+                        <button onClick={exportCSV} className="flex-1 py-3 bg-slate-700 text-white text-xs font-bold rounded-xl active-scale">
+                            📊 导出 CSV
+                        </button>
+                        <button onClick={() => setShowSyncModal(true)} className="flex-1 py-3 bg-indigo-600 text-white text-xs font-bold rounded-xl active-scale flex flex-col items-center leading-tight">
+                            <span>☁️ 同步云端</span>
+                            {lastSyncTime && <span className="text-[8px] text-indigo-200 mt-0.5">{lastSyncTime.slice(5, 16)}</span>}
+                        </button>
                     </div>
+
+                    {/* 云同步确认弹窗 */}
+                    {showSyncModal && (
+                        <div className="fixed inset-0 bg-slate-900/80 flex items-center justify-center p-6 z-[100] backdrop-blur-md">
+                            <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 space-y-6">
+                                <div className="text-center space-y-2">
+                                    <div className="text-4xl">☁️</div>
+                                    <h3 className="text-xl font-black">同步到云端</h3>
+                                    <p className="text-xs text-slate-400">
+                                        将上传 <span className="font-black text-indigo-600">{state.logs.length} 条记录</span> 和标签库到阿里云
+                                    </p>
+                                    {lastSyncTime && (
+                                        <p className="text-[10px] text-slate-300">上次同步：{lastSyncTime}</p>
+                                    )}
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                    <button onClick={handleManualSync} disabled={syncing}
+                                        className={`w-full py-4 rounded-2xl font-black active-scale text-white ${syncing ? 'bg-indigo-300' : 'bg-indigo-600'}`}>
+                                        {syncing ? '⏳ 同步中，请稍候...' : '确认上传'}
+                                    </button>
+                                    <button onClick={() => setShowSyncModal(false)} disabled={syncing}
+                                        className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
 
                     {/* 结算弹窗 */}
                     {showResetModal && (
                         <div className="fixed inset-0 bg-slate-900/80 flex items-center justify-center p-6 z-[100] backdrop-blur-md">
                             <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 space-y-6">
                                 <h3 className="text-xl font-black text-center">结算并重置今日？</h3>
-                                <p className="text-xs text-slate-400 text-center">今日数据已保存在云端，重置后可随时导出</p>
+                                <p className="text-xs text-slate-400 text-center">建议先点「同步云端」备份数据，再结算重置</p>
                                 <div className="flex flex-col gap-2">
                                     <button onClick={handleFinalReset} className="w-full py-4 bg-red-500 text-white rounded-2xl font-black active-scale">确认结算并重置</button>
                                     <button onClick={() => setShowResetModal(false)} className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button>
@@ -302,17 +275,13 @@
                     {showTagModal && (
                         <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-6 z-50 backdrop-blur-md">
                             <div className="bg-white rounded-[2rem] w-full max-w-sm p-8 space-y-4">
-                                <div className="flex justify-between items-center">
-                                    <h3 className="text-xl font-black">标签管理</h3>
-                                    <span className="text-[10px] text-indigo-400 font-bold">☁️ 自动同步云端</span>
-                                </div>
+                                <h3 className="text-xl font-black">标签管理</h3>
                                 <div className="flex gap-2">
                                     <input type="text" id="tagInput" placeholder="新标签名称..." className="flex-1 px-4 py-3 bg-slate-100 rounded-xl outline-none text-sm" />
                                     <button onClick={() => {
                                         const val = document.getElementById('tagInput').value.trim();
                                         if (val && !state.tags.includes(val)) {
-                                            const newTags = [...state.tags, val];
-                                            updateTags(newTags);
+                                            setState(s => ({ ...s, tags: [...s.tags, val] }));
                                             document.getElementById('tagInput').value = "";
                                         }
                                     }} className="bg-indigo-600 text-white px-5 rounded-xl font-bold text-sm">添加</button>
@@ -321,13 +290,12 @@
                                     {state.tags.map((tag, idx) => (
                                         <div key={idx} className="flex justify-between items-center p-4 bg-slate-50 rounded-xl">
                                             <span className="text-sm font-medium">{tag}</span>
-                                            <button className="text-red-400 text-xs font-bold" onClick={() => {
-                                                const newTags = state.tags.filter((_, i) => i !== idx);
-                                                updateTags(newTags);
-                                            }}>删除</button>
+                                            <button className="text-red-400 text-xs font-bold"
+                                                onClick={() => setState(s => ({ ...s, tags: s.tags.filter((_, i) => i !== idx) }))}>删除</button>
                                         </div>
                                     ))}
                                 </div>
+                                <p className="text-[10px] text-slate-300 text-center">修改标签后，记得点底部「同步云端」保存</p>
                                 <button onClick={() => setShowTagModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-black text-slate-600">关闭</button>
                             </div>
                         </div>
@@ -353,7 +321,7 @@
                         </div>
                     )}
 
-                    {/* Toast 提示 */}
+                    {/* Toast */}
                     <div className={`fixed bottom-28 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full text-xs font-bold transition-all z-[110] whitespace-nowrap ${toast.show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
                         {toast.message}
                     </div>
