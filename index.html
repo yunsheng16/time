@@ -5,332 +5,656 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <title>时光足迹 - 网页 App</title>
+    <title>时光足迹</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
-        body { font-family: 'Inter', sans-serif; background-color: #f0f2f5; -webkit-tap-highlight-color: transparent; }
-        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.5); }
-        .active-scale:active { transform: scale(0.95); transition: transform 0.1s; }
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&family=DM+Mono:wght@400;500&display=swap');
+        * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+        body { font-family: 'DM Sans', sans-serif; background: #F5F4F0; margin: 0; }
+        .mono { font-family: 'DM Mono', monospace; }
+        .active-scale:active { transform: scale(0.96); }
+        .glass { background: rgba(255,255,255,0.85); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.6); }
+        ::-webkit-scrollbar { display: none; }
+        .tag-pill { transition: all 0.15s ease; }
+        .tag-pill:active { transform: scale(0.93); }
+        .slide-up { animation: slideUp 0.25s cubic-bezier(0.34,1.56,0.64,1) both; }
+        @keyframes slideUp { from { transform: translateY(30px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .fade-in { animation: fadeIn 0.2s ease both; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .nav-tab { transition: all 0.2s ease; }
     </style>
 </head>
 <body>
-    <div id="root"></div>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
 
-    <script type="text/babel">
-        const { useState, useEffect } = React;
+const API_BASE = 'https://timetracker-api-chfnsbnnlv.cn-beijing.fcapp.run';
 
-        const API_BASE = 'https://timetracker-api-chfnsbnnlv.cn-beijing.fcapp.run';
+// ── 默认分类和标签 ──────────────────────────────────────
+const DEFAULT_CATEGORIES = [
+  { id: 'work',    name: '工作学习', color: '#6366F1', icon: '💼', tags: ['办公', '会议', '学习', '阅读'] },
+  { id: 'life',    name: '日常生活', color: '#F59E0B', icon: '🏠', tags: ['用餐', '通勤', '洗漱', '家务'] },
+  { id: 'health',  name: '健康运动', color: '#10B981', icon: '💪', tags: ['健身', '跑步', '午休', '冥想'] },
+  { id: 'leisure', name: '休闲娱乐', color: '#EC4899', icon: '🎮', tags: ['摸鱼', '刷手机', '看剧', '社交'] },
+];
 
-        const App = () => {
-            const [state, setState] = useState({
-                isStarted: false,
-                startTime: null,
-                lastMarkTime: null,
-                selectedTag: "默认",
-                tags: ["健身", "办公", "通勤", "用餐", "午休", "阅读", "摸鱼", "洗漱"],
-                logs: [],
-            });
+// ── 工具函数 ───────────────────────────────────────────
+const fmt = (ms) => {
+  const s = Math.floor((ms/1000)%60), m = Math.floor((ms/60000)%60), h = Math.floor(ms/3600000);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+};
+const fmtTime = (ts) => new Date(ts).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'});
+const fmtDate = (ts) => new Date(ts).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replace('/','月').replace('/','日').slice(0,-1) + '日';
+const dateKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
+const todayKey = () => dateKey(Date.now());
 
-            const [showTagModal, setShowTagModal] = useState(false);
-            const [showResetModal, setShowResetModal] = useState(false);
-            const [showEditModal, setShowEditModal] = useState(false);
-            const [showSyncModal, setShowSyncModal] = useState(false);
-            const [editingIndex, setEditingIndex] = useState(null);
-            const [currentTime, setCurrentTime] = useState(Date.now());
-            const [toast, setToast] = useState({ show: false, message: "" });
-            const [syncing, setSyncing] = useState(false);
-            const [lastSyncTime, setLastSyncTime] = useState(null);
+const STORAGE_KEY = 'timetracker_v3';
+const SYNC_KEY = 'timetracker_last_sync';
 
-            // 启动时只读本地，不自动连云端
-            useEffect(() => {
-                const saved = localStorage.getItem('timetracker_github_v1');
-                if (saved) setState(JSON.parse(saved));
-                const lastSync = localStorage.getItem('timetracker_last_sync');
-                if (lastSync) setLastSyncTime(lastSync);
-                const timer = setInterval(() => setCurrentTime(Date.now()), 1000);
-                return () => clearInterval(timer);
-            }, []);
+// ── 主应用 ─────────────────────────────────────────────
+const App = () => {
+  const [tab, setTab] = useState('today'); // today | history
+  const [state, setState] = useState({
+    isStarted: false,
+    startTime: null,
+    lastMarkTime: null,
+    selectedCatId: 'work',
+    selectedTag: '办公',
+    categories: DEFAULT_CATEGORIES,
+    todayLogs: [],
+    allDayLogs: {}, // { 'dateKey': [...logs] }
+  });
+  const [now, setNow] = useState(Date.now());
+  const [toast, setToast] = useState({ show: false, msg: '' });
+  const [modal, setModal] = useState(null); // null | 'reset' | 'sync' | 'catMgr' | 'export' | 'dayDetail' | 'editTag'
+  const [modalData, setModalData] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState('');
 
-            useEffect(() => {
-                localStorage.setItem('timetracker_github_v1', JSON.stringify(state));
-            }, [state]);
+  // ── 历史日历状态 ──
+  const [calYear, setCalYear] = useState(new Date().getFullYear());
+  const [calMonth, setCalMonth] = useState(new Date().getMonth());
 
-            const showToast = (msg) => {
-                setToast({ show: true, message: msg });
-                setTimeout(() => setToast({ show: false, message: "" }), 2500);
-            };
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) try { setState(JSON.parse(saved)); } catch(e){}
+    const ls = localStorage.getItem(SYNC_KEY);
+    if (ls) setLastSync(ls);
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
-            const formatDuration = (ms) => {
-                const s = Math.floor((ms / 1000) % 60);
-                const m = Math.floor((ms / (1000 * 60)) % 60);
-                const h = Math.floor(ms / (1000 * 60 * 60));
-                return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-            };
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [state]);
 
-            const formatTime = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+  const showToast = (msg) => {
+    setToast({ show: true, msg });
+    setTimeout(() => setToast({ show: false, msg: '' }), 2500);
+  };
 
-            const startDay = () => {
-                const now = Date.now();
-                setState(prev => ({ ...prev, isStarted: true, startTime: now, lastMarkTime: now, logs: [] }));
-                showToast("☀️ 开启新的一天");
-            };
+  // ── 今日操作 ──────────────────────────────────────────
+  const startDay = () => {
+    const t = Date.now();
+    setState(p => ({ ...p, isStarted: true, startTime: t, lastMarkTime: t, todayLogs: [] }));
+    showToast('☀️ 开启新的一天');
+  };
 
-            const markMoment = () => {
-                const now = Date.now();
-                const durationMs = now - state.lastMarkTime;
-                const newLog = {
-                    start: state.lastMarkTime,
-                    end: now,
-                    durationMs,
-                    durationStr: formatDuration(durationMs),
-                    tag: state.selectedTag
-                };
-                setState(prev => ({ ...prev, lastMarkTime: now, logs: [...prev.logs, newLog] }));
-                showToast(`📍 已记录: ${state.selectedTag}`);
-            };
+  const markMoment = () => {
+    const t = Date.now();
+    const ms = t - state.lastMarkTime;
+    const log = { start: state.lastMarkTime, end: t, durationMs: ms, durationStr: fmt(ms), tag: state.selectedTag, catId: state.selectedCatId };
+    setState(p => ({ ...p, lastMarkTime: t, todayLogs: [...p.todayLogs, log] }));
+    showToast(`📍 ${state.selectedTag} · ${fmt(ms)}`);
+  };
 
-            const handleFinalReset = () => {
-                setState(prev => ({ ...prev, isStarted: false, startTime: null, lastMarkTime: null, logs: [] }));
-                setShowResetModal(false);
-                showToast("✅ 已结算重置");
-            };
+  const deleteLog = (idx) => {
+    setState(p => ({ ...p, todayLogs: p.todayLogs.filter((_,i) => i !== idx) }));
+  };
 
-            // 手动同步：一次性上传所有数据
-            const handleManualSync = async () => {
-                setSyncing(true);
-                try {
-                    // 上传标签
-                    await fetch(`${API_BASE}/tags`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ tags: state.tags }),
-                    });
-                    // 逐条上传日志
-                    for (const log of state.logs) {
-                        await fetch(`${API_BASE}/logs`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ log }),
-                        });
-                    }
-                    const now = new Date().toLocaleString('zh-CN');
-                    setLastSyncTime(now);
-                    localStorage.setItem('timetracker_last_sync', now);
-                    showToast(`☁️ 同步成功！${state.logs.length} 条记录已备份`);
-                } catch (e) {
-                    showToast('❌ 同步失败，请检查网络');
-                }
-                setSyncing(false);
-                setShowSyncModal(false);
-            };
+  const editLogTag = (idx, tag, catId) => {
+    setState(p => {
+      const logs = [...p.todayLogs];
+      logs[idx] = { ...logs[idx], tag, catId };
+      return { ...p, todayLogs: logs };
+    });
+    setModal(null);
+  };
 
-            const exportCSV = () => {
-                let csv = "\uFEFF开始,结束,时长,标签\n";
-                state.logs.forEach(l => { csv += `${formatTime(l.start)},${formatTime(l.end)},${l.durationStr},${l.tag}\n`; });
-                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-                const a = document.createElement('a');
-                a.href = URL.createObjectURL(blob);
-                a.download = `时光记录_${new Date().toLocaleDateString()}.csv`;
-                a.click();
-            };
+  const handleReset = () => {
+    const dk = todayKey();
+    setState(p => ({
+      ...p,
+      isStarted: false, startTime: null, lastMarkTime: null, todayLogs: [],
+      allDayLogs: { ...p.allDayLogs, [dk]: p.todayLogs },
+    }));
+    setModal(null);
+    showToast('✅ 已归档今日记录');
+  };
 
-            return (
-                <div className="min-h-screen pb-36">
+  // ── 分类/标签管理 ─────────────────────────────────────
+  const getCatColor = (catId) => {
+    const cat = state.categories.find(c => c.id === catId);
+    return cat ? cat.color : '#94A3B8';
+  };
 
-                    {/* Header */}
-                    <div className="p-4 flex justify-between items-center max-w-md mx-auto">
-                        <div>
-                            <h1 className="text-xl font-black text-indigo-600">时光足迹</h1>
-                            <p className="text-[10px] text-slate-400 font-bold uppercase">{new Date().toLocaleDateString('zh-CN', {weekday: 'long', month: 'short', day: 'numeric'})}</p>
-                        </div>
-                        <button onClick={() => setShowResetModal(true)} className="text-[10px] bg-red-50 text-red-600 px-3 py-1.5 rounded-full font-black border border-red-100 active-scale">结算今日</button>
+  const updateCategories = (cats) => setState(p => ({ ...p, categories: cats }));
+
+  // ── 云同步 ────────────────────────────────────────────
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const allTags = state.categories.flatMap(c => c.tags);
+      await fetch(`${API_BASE}/tags`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tags: allTags, categories: state.categories }) });
+      for (const log of state.todayLogs) {
+        await fetch(`${API_BASE}/logs`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ log }) });
+      }
+      const t = new Date().toLocaleString('zh-CN');
+      setLastSync(t); localStorage.setItem(SYNC_KEY, t);
+      showToast(`☁️ 同步成功 · ${state.todayLogs.length} 条`);
+    } catch { showToast('❌ 同步失败，数据已本地保存'); }
+    setSyncing(false); setModal(null);
+  };
+
+  // ── 导出 CSV ──────────────────────────────────────────
+  const handleExport = (range) => {
+    const allLogs = { ...state.allDayLogs, [todayKey()]: state.todayLogs };
+    const now = Date.now();
+    const cutoffs = { today: Date.now()-86400000, week: now-7*86400000, month: now-30*86400000, all: 0 };
+    const cutoff = cutoffs[range] || 0;
+    let rows = [];
+    Object.entries(allLogs).forEach(([dk, logs]) => {
+      if (!logs || logs.length === 0) return;
+      const dayTs = new Date(dk).getTime();
+      if (dayTs < cutoff && range !== 'all') return;
+      logs.forEach(l => rows.push({ date: dk, ...l }));
+    });
+    if (rows.length === 0) { showToast('该范围内暂无数据'); setModal(null); return; }
+    let csv = '\uFEFF日期,开始,结束,时长,标签,分类\n';
+    rows.forEach(r => {
+      const cat = state.categories.find(c => c.id === r.catId);
+      csv += `${r.date},${fmtTime(r.start)},${fmtTime(r.end)},${r.durationStr},${r.tag},${cat ? cat.name : ''}\n`;
+    });
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    const labels = { today:'今日', week:'近7天', month:'本月', all:'全部' };
+    a.download = `时光足迹_${labels[range]}_${new Date().toLocaleDateString()}.csv`;
+    a.click(); setModal(null); showToast('📊 导出成功');
+  };
+
+  // ── 日历数据 ──────────────────────────────────────────
+  const calDays = useMemo(() => {
+    const first = new Date(calYear, calMonth, 1).getDay();
+    const last = new Date(calYear, calMonth+1, 0).getDate();
+    const cells = [];
+    for (let i = 0; i < first; i++) cells.push(null);
+    for (let d = 1; d <= last; d++) cells.push(d);
+    return cells;
+  }, [calYear, calMonth]);
+
+  const hasDayData = (d) => {
+    if (!d) return false;
+    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
+    const isToday = dk === todayKey();
+    if (isToday) return state.todayLogs.length > 0;
+    return state.allDayLogs[dk] && state.allDayLogs[dk].length > 0;
+  };
+
+  const getDayLogs = (d) => {
+    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
+    if (dk === todayKey()) return state.todayLogs;
+    return state.allDayLogs[dk] || [];
+  };
+
+  const isToday = (d) => {
+    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
+    return dk === todayKey();
+  };
+
+  // ── 渲染 ──────────────────────────────────────────────
+  const selectedCat = state.categories.find(c => c.id === state.selectedCatId) || state.categories[0];
+
+  return (
+    <div style={{maxWidth:480,margin:'0 auto',minHeight:'100vh',position:'relative',paddingBottom:100}}>
+
+      {/* ── Header ── */}
+      <div style={{padding:'20px 20px 0',display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+        <div>
+          <div style={{fontSize:22,fontWeight:900,color:'#1C1917',letterSpacing:'-0.5px'}}>时光足迹</div>
+          <div style={{fontSize:11,color:'#A8A29E',fontWeight:500,marginTop:2}}>
+            {new Date().toLocaleDateString('zh-CN',{weekday:'long',month:'long',day:'numeric'})}
+          </div>
+        </div>
+        <button onClick={() => setModal('reset')} style={{fontSize:11,background:'#FEF2F2',color:'#EF4444',padding:'6px 14px',borderRadius:20,fontWeight:700,border:'1px solid #FECACA'}} className="active-scale">
+          结算今日
+        </button>
+      </div>
+
+      {/* ── Tab Nav ── */}
+      <div style={{display:'flex',gap:4,margin:'16px 20px 0',background:'#E8E5DF',borderRadius:16,padding:4}}>
+        {[['today','⏱ 今日记录'],['history','📅 历史回顾']].map(([t,label]) => (
+          <button key={t} onClick={() => setTab(t)} className="nav-tab" style={{
+            flex:1, padding:'9px 0', borderRadius:12, fontSize:12, fontWeight:700,
+            background: tab===t ? '#fff' : 'transparent',
+            color: tab===t ? '#1C1917' : '#A8A29E',
+            boxShadow: tab===t ? '0 1px 4px rgba(0,0,0,0.1)' : 'none',
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {/* ════════════════════════════════════
+          TAB: 今日记录
+      ════════════════════════════════════ */}
+      {tab === 'today' && (
+        <div className="fade-in" style={{padding:'16px 20px 0'}}>
+
+          {/* 计时卡片 */}
+          <div style={{background:'#1C1917',borderRadius:28,padding:'28px 24px',textAlign:'center',marginBottom:16}}>
+            <div style={{fontSize:10,color:'#78716C',fontWeight:700,letterSpacing:3,textTransform:'uppercase',marginBottom:6}}>今日总清醒</div>
+            <div className="mono" style={{fontSize:52,fontWeight:500,color:'#FAFAF9',letterSpacing:-2,lineHeight:1}}>
+              {state.isStarted ? fmt(now - state.startTime) : '00:00:00'}
+            </div>
+            <div style={{height:1,background:'#292524',margin:'20px 0'}}></div>
+            <div style={{fontSize:10,color:'#78716C',fontWeight:700,letterSpacing:3,textTransform:'uppercase',marginBottom:6}}>当前阶段</div>
+            <div className="mono" style={{fontSize:32,fontWeight:500,color: selectedCat.color, letterSpacing:-1}}>
+              {state.isStarted ? fmt(now - state.lastMarkTime) : '00:00:00'}
+            </div>
+          </div>
+
+          {/* 开启按钮 / 标签+记录按钮 */}
+          {!state.isStarted ? (
+            <button onClick={startDay} className="active-scale" style={{width:'100%',padding:'24px 0',background:'#6366F1',color:'#fff',borderRadius:24,fontSize:18,fontWeight:900,border:'none',cursor:'pointer',marginBottom:16}}>
+              ☀️ 开启新的一天
+            </button>
+          ) : (
+            <div style={{marginBottom:16}}>
+              {/* 分类标签选择器 */}
+              <div style={{marginBottom:12}}>
+                {state.categories.map((cat, ci) => (
+                  <div key={cat.id} style={{marginBottom: ci < state.categories.length-1 ? 16 : 0}}>
+                    {/* 分类标题行 */}
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,paddingLeft:2}}>
+                      <span style={{fontSize:13}}>{cat.icon}</span>
+                      <span style={{fontSize:11,fontWeight:700,color:'#A8A29E',textTransform:'uppercase',letterSpacing:1}}>{cat.name}</span>
+                      <div style={{flex:1,height:1,background:'#E8E5DF',marginLeft:4}}></div>
                     </div>
-
-                    <div className="max-w-md mx-auto px-4 space-y-6">
-                        {/* Timer Card */}
-                        <div className="bg-white rounded-[2.5rem] p-8 shadow-xl shadow-indigo-100/50 text-center space-y-6 border border-white">
-                            <div className="space-y-1">
-                                <p className="text-[10px] font-black text-slate-300 uppercase tracking-widest">今日总清醒</p>
-                                <p className="text-5xl font-black text-slate-900 tabular-nums">{state.isStarted ? formatDuration(currentTime - state.startTime) : "00:00:00"}</p>
-                            </div>
-                            <div className="h-px bg-slate-100 w-full"></div>
-                            <div className="space-y-1">
-                                <p className="text-[10px] font-black text-slate-300 uppercase tracking-widest">当前阶段</p>
-                                <p className="text-3xl font-bold text-indigo-600 tabular-nums">{state.isStarted ? formatDuration(currentTime - state.lastMarkTime) : "00:00:00"}</p>
-                            </div>
-                        </div>
-
-                        {!state.isStarted ? (
-                            <button onClick={startDay} className="w-full py-8 bg-indigo-600 text-white rounded-[2rem] text-xl font-black shadow-xl active-scale">☀️ 开启新的一天</button>
-                        ) : (
-                            <div className="space-y-8">
-                                <div className="space-y-4">
-                                    <div className="flex justify-between items-center px-1">
-                                        <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest">选择标签</h2>
-                                        <button onClick={() => setShowTagModal(true)} className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full">管理库</button>
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                        {state.tags.map(tag => (
-                                            <button key={tag} onClick={() => setState(s => ({...s, selectedTag: tag}))}
-                                                className={`px-5 py-3 rounded-2xl text-xs font-bold transition-all active-scale ${state.selectedTag === tag ? 'bg-indigo-600 text-white shadow-lg ring-4 ring-indigo-100' : 'bg-white text-slate-500 border border-slate-200'}`}>
-                                                {tag}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <button onClick={markMoment} className="w-full py-10 bg-slate-900 text-white rounded-[2.5rem] text-xl font-black shadow-2xl active-scale flex flex-col items-center">
-                                    <span>📍 记录并开始下一段</span>
-                                    <span className="text-[10px] font-medium text-slate-400 mt-1">标记为: {state.selectedTag}</span>
-                                </button>
-                            </div>
-                        )}
-
-                        {/* Logs */}
-                        <div className="space-y-4">
-                            <h2 className="text-xs font-black text-slate-400 uppercase tracking-widest px-1">今日记录 (点击标签可修改)</h2>
-                            <div className="space-y-3">
-                                {state.logs.length === 0
-                                    ? <div className="text-center py-10 text-slate-400 text-xs font-bold border-2 border-dashed border-slate-200 rounded-3xl">暂无记录</div>
-                                    : [...state.logs].reverse().map((log, idx) => {
-                                        const realIdx = state.logs.length - 1 - idx;
-                                        return (
-                                            <div key={idx} className="bg-white p-5 rounded-3xl shadow-sm border border-slate-100 flex justify-between items-center">
-                                                <div className="space-y-1">
-                                                    <div className="flex items-center gap-2">
-                                                        <span onClick={() => { setEditingIndex(realIdx); setShowEditModal(true); }}
-                                                            className="px-2 py-1 bg-indigo-50 text-indigo-600 text-[9px] font-black rounded-lg border border-indigo-100 cursor-pointer">
-                                                            {log.tag} ✎
-                                                        </span>
-                                                        <span className="text-[10px] text-slate-300 font-mono">{formatTime(log.start)} - {formatTime(log.end)}</span>
-                                                    </div>
-                                                    <p className="text-xl font-black text-slate-800">{log.durationStr}</p>
-                                                </div>
-                                                <button onClick={() => { if(confirm("删除记录？")) setState(s => ({...s, logs: s.logs.filter((_, i) => i !== realIdx)})) }}
-                                                    className="p-2 text-slate-200 hover:text-red-400">✕</button>
-                                            </div>
-                                        );
-                                    })
-                                }
-                            </div>
-                        </div>
+                    {/* 标签行 */}
+                    <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+                      {cat.tags.map(tag => {
+                        const active = state.selectedTag === tag && state.selectedCatId === cat.id;
+                        return (
+                          <button key={tag} className="tag-pill" onClick={() => setState(p => ({...p, selectedTag: tag, selectedCatId: cat.id}))}
+                            style={{
+                              padding:'9px 18px', borderRadius:20, fontSize:13, fontWeight:600, border:'none', cursor:'pointer',
+                              background: active ? cat.color : '#fff',
+                              color: active ? '#fff' : '#57534E',
+                              boxShadow: active ? `0 4px 14px ${cat.color}40` : '0 1px 3px rgba(0,0,0,0.08)',
+                              transform: active ? 'scale(1.04)' : 'scale(1)',
+                            }}>{tag}</button>
+                        );
+                      })}
                     </div>
+                  </div>
+                ))}
+                {/* 管理分类按钮 */}
+                <button onClick={() => setModal('catMgr')} style={{marginTop:12,fontSize:11,color:'#6366F1',fontWeight:700,background:'#EEF2FF',padding:'6px 14px',borderRadius:12,border:'none',cursor:'pointer'}} className="active-scale">
+                  ⚙️ 管理分类和标签
+                </button>
+              </div>
 
-                    {/* Footer - 两个按钮 */}
-                    <div className="fixed bottom-6 left-4 right-4 max-w-md mx-auto glass p-2 rounded-2xl shadow-2xl flex gap-2 z-40">
-                        <button onClick={exportCSV} className="flex-1 py-3 bg-slate-700 text-white text-xs font-bold rounded-xl active-scale">
-                            📊 导出 CSV
-                        </button>
-                        <button onClick={() => setShowSyncModal(true)} className="flex-1 py-3 bg-indigo-600 text-white text-xs font-bold rounded-xl active-scale flex flex-col items-center leading-tight">
-                            <span>☁️ 同步云端</span>
-                            {lastSyncTime && <span className="text-[8px] text-indigo-200 mt-0.5">{lastSyncTime.slice(5, 16)}</span>}
-                        </button>
+              {/* 记录按钮 */}
+              <button onClick={markMoment} className="active-scale" style={{
+                width:'100%', padding:'28px 0', borderRadius:28, border:'none', cursor:'pointer',
+                background: selectedCat.color, color:'#fff', fontSize:18, fontWeight:900,
+                boxShadow: `0 8px 24px ${selectedCat.color}50`,
+                display:'flex', flexDirection:'column', alignItems:'center', gap:4,
+              }}>
+                <span>📍 记录并开始下一段</span>
+                <span style={{fontSize:11,opacity:0.75,fontWeight:500}}>{selectedCat.icon} {state.selectedTag}</span>
+              </button>
+            </div>
+          )}
+
+          {/* 今日记录列表 */}
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:'#A8A29E',letterSpacing:2,textTransform:'uppercase',marginBottom:10}}>
+              今日记录 · {state.todayLogs.length} 段
+            </div>
+            {state.todayLogs.length === 0 ? (
+              <div style={{textAlign:'center',padding:'32px 0',color:'#C4B5A5',fontSize:13,fontWeight:500,border:'2px dashed #E8E5DF',borderRadius:20}}>
+                暂无记录，点击上方开始计时
+              </div>
+            ) : [...state.todayLogs].reverse().map((log, rIdx) => {
+              const realIdx = state.todayLogs.length - 1 - rIdx;
+              const color = getCatColor(log.catId);
+              return (
+                <div key={rIdx} className="slide-up" style={{background:'#fff',borderRadius:20,padding:'14px 16px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:10}}>
+                    <div style={{width:4,height:40,borderRadius:4,background:color,flexShrink:0}}></div>
+                    <div>
+                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
+                        <span onClick={() => { setModalData({idx:realIdx}); setModal('editTag'); }}
+                          style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'2px 8px',borderRadius:8,cursor:'pointer'}}>
+                          {log.tag} ✎
+                        </span>
+                        <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{fmtTime(log.start)} – {fmtTime(log.end)}</span>
+                      </div>
+                      <div className="mono" style={{fontSize:20,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
                     </div>
-
-                    {/* 云同步确认弹窗 */}
-                    {showSyncModal && (
-                        <div className="fixed inset-0 bg-slate-900/80 flex items-center justify-center p-6 z-[100] backdrop-blur-md">
-                            <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 space-y-6">
-                                <div className="text-center space-y-2">
-                                    <div className="text-4xl">☁️</div>
-                                    <h3 className="text-xl font-black">同步到云端</h3>
-                                    <p className="text-xs text-slate-400">
-                                        将上传 <span className="font-black text-indigo-600">{state.logs.length} 条记录</span> 和标签库到阿里云
-                                    </p>
-                                    {lastSyncTime && (
-                                        <p className="text-[10px] text-slate-300">上次同步：{lastSyncTime}</p>
-                                    )}
-                                </div>
-                                <div className="flex flex-col gap-2">
-                                    <button onClick={handleManualSync} disabled={syncing}
-                                        className={`w-full py-4 rounded-2xl font-black active-scale text-white ${syncing ? 'bg-indigo-300' : 'bg-indigo-600'}`}>
-                                        {syncing ? '⏳ 同步中，请稍候...' : '确认上传'}
-                                    </button>
-                                    <button onClick={() => setShowSyncModal(false)} disabled={syncing}
-                                        className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* 结算弹窗 */}
-                    {showResetModal && (
-                        <div className="fixed inset-0 bg-slate-900/80 flex items-center justify-center p-6 z-[100] backdrop-blur-md">
-                            <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-8 space-y-6">
-                                <h3 className="text-xl font-black text-center">结算并重置今日？</h3>
-                                <p className="text-xs text-slate-400 text-center">建议先点「同步云端」备份数据，再结算重置</p>
-                                <div className="flex flex-col gap-2">
-                                    <button onClick={handleFinalReset} className="w-full py-4 bg-red-500 text-white rounded-2xl font-black active-scale">确认结算并重置</button>
-                                    <button onClick={() => setShowResetModal(false)} className="w-full py-4 bg-slate-100 text-slate-500 rounded-2xl font-bold">取消</button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* 标签管理弹窗 */}
-                    {showTagModal && (
-                        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-6 z-50 backdrop-blur-md">
-                            <div className="bg-white rounded-[2rem] w-full max-w-sm p-8 space-y-4">
-                                <h3 className="text-xl font-black">标签管理</h3>
-                                <div className="flex gap-2">
-                                    <input type="text" id="tagInput" placeholder="新标签名称..." className="flex-1 px-4 py-3 bg-slate-100 rounded-xl outline-none text-sm" />
-                                    <button onClick={() => {
-                                        const val = document.getElementById('tagInput').value.trim();
-                                        if (val && !state.tags.includes(val)) {
-                                            setState(s => ({ ...s, tags: [...s.tags, val] }));
-                                            document.getElementById('tagInput').value = "";
-                                        }
-                                    }} className="bg-indigo-600 text-white px-5 rounded-xl font-bold text-sm">添加</button>
-                                </div>
-                                <div className="max-h-60 overflow-y-auto space-y-2">
-                                    {state.tags.map((tag, idx) => (
-                                        <div key={idx} className="flex justify-between items-center p-4 bg-slate-50 rounded-xl">
-                                            <span className="text-sm font-medium">{tag}</span>
-                                            <button className="text-red-400 text-xs font-bold"
-                                                onClick={() => setState(s => ({ ...s, tags: s.tags.filter((_, i) => i !== idx) }))}>删除</button>
-                                        </div>
-                                    ))}
-                                </div>
-                                <p className="text-[10px] text-slate-300 text-center">修改标签后，记得点底部「同步云端」保存</p>
-                                <button onClick={() => setShowTagModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-black text-slate-600">关闭</button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* 修改标签弹窗 */}
-                    {showEditModal && (
-                        <div className="fixed inset-0 bg-slate-900/80 flex items-end justify-center z-[60] backdrop-blur-sm">
-                            <div className="bg-white rounded-t-[2.5rem] w-full max-w-sm p-8 space-y-6">
-                                <h3 className="text-xl font-black">修改标签</h3>
-                                <div className="grid grid-cols-2 gap-3 max-h-72 overflow-y-auto">
-                                    {state.tags.map(tag => (
-                                        <button key={tag} onClick={() => {
-                                            const newLogs = [...state.logs];
-                                            newLogs[editingIndex].tag = tag;
-                                            setState(s => ({...s, logs: newLogs}));
-                                            setShowEditModal(false);
-                                        }} className="px-4 py-4 bg-slate-50 rounded-2xl text-sm font-black border active-scale">{tag}</button>
-                                    ))}
-                                </div>
-                                <button onClick={() => setShowEditModal(false)} className="w-full py-4 bg-slate-100 rounded-xl font-bold text-slate-600">取消</button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Toast */}
-                    <div className={`fixed bottom-28 left-1/2 -translate-x-1/2 bg-slate-900 text-white px-6 py-3 rounded-full text-xs font-bold transition-all z-[110] whitespace-nowrap ${toast.show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
-                        {toast.message}
-                    </div>
+                  </div>
+                  <button onClick={() => { if(confirm('删除这条记录？')) deleteLog(realIdx); }} style={{color:'#E2DDD8',fontSize:16,background:'none',border:'none',cursor:'pointer',padding:8}}>✕</button>
                 </div>
-            );
-        };
+              );
+            })}
+          </div>
+        </div>
+      )}
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
+      {/* ════════════════════════════════════
+          TAB: 历史回顾
+      ════════════════════════════════════ */}
+      {tab === 'history' && (
+        <div className="fade-in" style={{padding:'16px 20px 0'}}>
+          {/* 日历头 */}
+          <div style={{background:'#fff',borderRadius:24,padding:'20px',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+              <button onClick={() => { let m=calMonth-1,y=calYear; if(m<0){m=11;y--;} setCalMonth(m);setCalYear(y); }} style={{background:'#F5F4F0',border:'none',width:32,height:32,borderRadius:10,fontSize:16,cursor:'pointer'}} className="active-scale">←</button>
+              <span style={{fontWeight:900,fontSize:15,color:'#1C1917'}}>{calYear}年{calMonth+1}月</span>
+              <button onClick={() => { let m=calMonth+1,y=calYear; if(m>11){m=0;y++;} setCalMonth(m);setCalYear(y); }} style={{background:'#F5F4F0',border:'none',width:32,height:32,borderRadius:10,fontSize:16,cursor:'pointer'}} className="active-scale">→</button>
+            </div>
+            {/* 星期头 */}
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',textAlign:'center',marginBottom:8}}>
+              {['日','一','二','三','四','五','六'].map(d => (
+                <div key={d} style={{fontSize:11,fontWeight:700,color:'#C4B5A5',padding:'4px 0'}}>{d}</div>
+              ))}
+            </div>
+            {/* 日期格子 */}
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4}}>
+              {calDays.map((d, i) => {
+                const hasData = hasDayData(d);
+                const isTd = d && isToday(d);
+                const dk = d ? new Date(calYear, calMonth, d).toLocaleDateString('zh-CN') : '';
+                const logs = d ? getDayLogs(d) : [];
+                // get unique cat colors for dots
+                const catColors = [...new Set(logs.map(l => l.catId))].slice(0,3).map(getCatColor);
+                return (
+                  <div key={i} onClick={() => { if(d && hasData) { setModalData({ d, dk, logs }); setModal('dayDetail'); } }}
+                    style={{
+                      aspectRatio:'1', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+                      borderRadius:12, cursor: hasData ? 'pointer' : 'default',
+                      background: isTd ? '#6366F1' : hasData ? '#F0F0FF' : 'transparent',
+                      position:'relative',
+                    }}>
+                    {d && <span style={{fontSize:13,fontWeight:isTd?900:500,color:isTd?'#fff':hasData?'#4338CA':'#78716C'}}>{d}</span>}
+                    {hasData && !isTd && (
+                      <div style={{display:'flex',gap:2,marginTop:2}}>
+                        {catColors.map((c,i) => <div key={i} style={{width:4,height:4,borderRadius:2,background:c}}></div>)}
+                      </div>
+                    )}
+                    {hasData && isTd && <div style={{width:4,height:4,borderRadius:2,background:'rgba(255,255,255,0.7)',marginTop:2}}></div>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{marginTop:12,fontSize:11,color:'#C4B5A5',textAlign:'center',fontWeight:500}}>
+            有色点代表当天有记录，点击查看详情
+          </div>
+        </div>
+      )}
+
+      {/* ── 底部操作栏 ── */}
+      <div className="glass" style={{position:'fixed',bottom:16,left:16,right:16,maxWidth:448,margin:'0 auto',borderRadius:20,padding:8,display:'flex',gap:8,boxShadow:'0 4px 24px rgba(0,0,0,0.12)',zIndex:40}}>
+        <button onClick={() => setModal('export')} className="active-scale" style={{flex:1,padding:'11px 0',background:'#292524',color:'#fff',borderRadius:14,fontSize:12,fontWeight:700,border:'none',cursor:'pointer'}}>
+          📊 导出数据
+        </button>
+        <button onClick={() => setModal('sync')} className="active-scale" style={{flex:1,padding:'11px 0',background:'#6366F1',color:'#fff',borderRadius:14,fontSize:12,fontWeight:700,border:'none',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',lineHeight:1.3}}>
+          <span>☁️ 同步云端</span>
+          {lastSync && <span style={{fontSize:9,opacity:0.7,marginTop:2}}>{lastSync.slice(5,16)}</span>}
+        </button>
+      </div>
+
+      {/* ════ MODALS ════ */}
+
+      {/* 结算确认 */}
+      {modal === 'reset' && (
+        <ModalWrap onClose={() => setModal(null)}>
+          <div style={{textAlign:'center',marginBottom:20}}>
+            <div style={{fontSize:40,marginBottom:8}}>🌙</div>
+            <div style={{fontSize:20,fontWeight:900,color:'#1C1917'}}>结算今日？</div>
+            <div style={{fontSize:12,color:'#A8A29E',marginTop:6}}>今日 {state.todayLogs.length} 条记录将归档到历史</div>
+            <div style={{fontSize:11,color:'#C4B5A5',marginTop:4}}>建议先同步云端再结算</div>
+          </div>
+          <Btn color="#EF4444" onClick={handleReset}>确认归档结算</Btn>
+          <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
+        </ModalWrap>
+      )}
+
+      {/* 云同步 */}
+      {modal === 'sync' && (
+        <ModalWrap onClose={() => setModal(null)}>
+          <div style={{textAlign:'center',marginBottom:20}}>
+            <div style={{fontSize:40,marginBottom:8}}>☁️</div>
+            <div style={{fontSize:20,fontWeight:900}}>同步到云端</div>
+            <div style={{fontSize:12,color:'#A8A29E',marginTop:6}}>上传 {state.todayLogs.length} 条记录 + 分类标签</div>
+            {lastSync && <div style={{fontSize:11,color:'#C4B5A5',marginTop:4}}>上次同步：{lastSync}</div>}
+          </div>
+          <Btn color="#6366F1" onClick={handleSync} disabled={syncing}>{syncing ? '⏳ 同步中...' : '确认上传'}</Btn>
+          <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)} disabled={syncing}>取消</Btn>
+        </ModalWrap>
+      )}
+
+      {/* 导出选择 */}
+      {modal === 'export' && (
+        <ModalWrap onClose={() => setModal(null)}>
+          <div style={{fontSize:18,fontWeight:900,marginBottom:6}}>选择导出范围</div>
+          <div style={{fontSize:12,color:'#A8A29E',marginBottom:20}}>将生成 Excel 可读的 CSV 文件</div>
+          {[['today','📅 仅今日'],['week','📆 最近 7 天'],['month','🗓 本月（30天）'],['all','📚 全部历史']].map(([k,label]) => (
+            <Btn key={k} color="#F5F4F0" textColor="#1C1917" onClick={() => handleExport(k)} style={{marginBottom:8,textAlign:'left',paddingLeft:20}}>
+              {label}
+            </Btn>
+          ))}
+          <Btn color="#E8E5DF" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
+        </ModalWrap>
+      )}
+
+      {/* 历史某天详情 */}
+      {modal === 'dayDetail' && modalData && (
+        <ModalWrap onClose={() => setModal(null)} tall>
+          <div style={{fontSize:16,fontWeight:900,marginBottom:4}}>
+            {fmtDate(new Date(calYear, calMonth, modalData.d).getTime())} 记录
+          </div>
+          <div style={{fontSize:11,color:'#A8A29E',marginBottom:16}}>{modalData.logs.length} 段时间记录</div>
+          <div style={{maxHeight:'55vh',overflowY:'auto'}}>
+            {modalData.logs.map((log, i) => {
+              const color = getCatColor(log.catId);
+              return (
+                <div key={i} style={{display:'flex',gap:10,alignItems:'center',padding:'10px 0',borderBottom:'1px solid #F5F4F0'}}>
+                  <div style={{width:4,height:36,borderRadius:4,background:color,flexShrink:0}}></div>
+                  <div style={{flex:1}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                      <span style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'1px 7px',borderRadius:6}}>{log.tag}</span>
+                      <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{fmtTime(log.start)}–{fmtTime(log.end)}</span>
+                    </div>
+                    <div className="mono" style={{fontSize:17,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{marginTop:16}}>
+            <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)}>关闭</Btn>
+          </div>
+        </ModalWrap>
+      )}
+
+      {/* 修改记录标签 */}
+      {modal === 'editTag' && modalData && (
+        <ModalWrap onClose={() => setModal(null)} bottom>
+          <div style={{fontSize:16,fontWeight:900,marginBottom:16}}>修改标签</div>
+          <div style={{maxHeight:'60vh',overflowY:'auto'}}>
+            {state.categories.map((cat, ci) => (
+              <div key={cat.id} style={{marginBottom: ci < state.categories.length-1 ? 20 : 0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
+                  <span style={{fontSize:12}}>{cat.icon}</span>
+                  <span style={{fontSize:10,fontWeight:700,color:'#A8A29E',textTransform:'uppercase',letterSpacing:1}}>{cat.name}</span>
+                  <div style={{flex:1,height:1,background:'#F5F4F0'}}></div>
+                </div>
+                <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+                  {cat.tags.map(tag => (
+                    <button key={tag} className="tag-pill" onClick={() => editLogTag(modalData.idx, tag, cat.id)}
+                      style={{padding:'8px 16px',borderRadius:18,fontSize:13,fontWeight:600,background:'#F5F4F0',color:'#57534E',border:'none',cursor:'pointer'}}>
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:16}}>
+            <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
+          </div>
+        </ModalWrap>
+      )}
+
+      {/* 分类和标签管理 */}
+      {modal === 'catMgr' && (
+        <CatMgrModal categories={state.categories} onSave={updateCategories} onClose={() => setModal(null)} />
+      )}
+
+      {/* Toast */}
+      <div style={{
+        position:'fixed', bottom:90, left:'50%', transform:'translateX(-50%)',
+        background:'#1C1917', color:'#fff', padding:'10px 20px', borderRadius:24,
+        fontSize:12, fontWeight:700, zIndex:200, whiteSpace:'nowrap',
+        transition:'opacity 0.2s', opacity: toast.show ? 1 : 0, pointerEvents:'none',
+      }}>{toast.msg}</div>
+    </div>
+  );
+};
+
+// ── 分类管理 Modal ────────────────────────────────────
+const CatMgrModal = ({ categories, onSave, onClose }) => {
+  const [cats, setCats] = useState(JSON.parse(JSON.stringify(categories)));
+  const [activeCat, setActiveCat] = useState(cats[0]?.id);
+  const [newCatName, setNewCatName] = useState('');
+  const [newTag, setNewTag] = useState('');
+
+  const cat = cats.find(c => c.id === activeCat);
+
+  const addCat = () => {
+    if (!newCatName.trim()) return;
+    const id = 'cat_' + Date.now();
+    const icons = ['🎯','⚡','🌟','🔥','💡','🎨'];
+    const colors = ['#8B5CF6','#F97316','#06B6D4','#84CC16'];
+    const newCat = { id, name: newCatName.trim(), color: colors[cats.length % colors.length], icon: icons[cats.length % icons.length], tags: [] };
+    setCats(p => [...p, newCat]);
+    setActiveCat(id);
+    setNewCatName('');
+  };
+
+  const deleteCat = (id) => {
+    if (cats.length <= 1) return;
+    const next = cats.find(c => c.id !== id);
+    setCats(p => p.filter(c => c.id !== id));
+    setActiveCat(next?.id);
+  };
+
+  const addTag = () => {
+    if (!newTag.trim() || !cat) return;
+    if (cat.tags.includes(newTag.trim())) return;
+    setCats(p => p.map(c => c.id === activeCat ? { ...c, tags: [...c.tags, newTag.trim()] } : c));
+    setNewTag('');
+  };
+
+  const deleteTag = (tag) => {
+    setCats(p => p.map(c => c.id === activeCat ? { ...c, tags: c.tags.filter(t => t !== tag) } : c));
+  };
+
+  return (
+    <ModalWrap onClose={onClose} tall>
+      <div style={{fontSize:17,fontWeight:900,marginBottom:16}}>分类和标签管理</div>
+
+      {/* 分类列表 */}
+      <div style={{display:'flex',gap:8,marginBottom:16,overflowX:'auto',paddingBottom:4}}>
+        {cats.map(c => (
+          <button key={c.id} onClick={() => setActiveCat(c.id)} style={{
+            flexShrink:0, padding:'7px 14px', borderRadius:16, fontSize:12, fontWeight:700, border:'none', cursor:'pointer',
+            background: activeCat===c.id ? c.color : '#F5F4F0',
+            color: activeCat===c.id ? '#fff' : '#78716C',
+          }}>{c.icon} {c.name}</button>
+        ))}
+      </div>
+
+      {/* 新增分类 */}
+      <div style={{display:'flex',gap:8,marginBottom:16}}>
+        <input value={newCatName} onChange={e=>setNewCatName(e.target.value)} placeholder="新分类名称..." onKeyDown={e=>e.key==='Enter'&&addCat()}
+          style={{flex:1,padding:'9px 14px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:13,outline:'none',background:'#FAFAF9'}} />
+        <button onClick={addCat} style={{padding:'9px 16px',background:'#6366F1',color:'#fff',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>+ 添加</button>
+      </div>
+
+      {/* 当前分类的标签 */}
+      {cat && (
+        <div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <div style={{fontSize:13,fontWeight:700,color:'#1C1917'}}>{cat.icon} {cat.name} 的标签</div>
+            {cats.length > 1 && (
+              <button onClick={() => deleteCat(cat.id)} style={{fontSize:11,color:'#EF4444',background:'#FEF2F2',padding:'4px 10px',borderRadius:10,border:'none',cursor:'pointer'}}>删除此分类</button>
+            )}
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:12}}>
+            <input value={newTag} onChange={e=>setNewTag(e.target.value)} placeholder="新标签名..." onKeyDown={e=>e.key==='Enter'&&addTag()}
+              style={{flex:1,padding:'9px 14px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:13,outline:'none',background:'#FAFAF9'}} />
+            <button onClick={addTag} style={{padding:'9px 16px',background:cat.color,color:'#fff',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>+ 添加</button>
+          </div>
+          <div style={{maxHeight:'28vh',overflowY:'auto',display:'flex',flexWrap:'wrap',gap:8}}>
+            {cat.tags.map(tag => (
+              <div key={tag} style={{display:'flex',alignItems:'center',gap:4,background:'#F5F4F0',borderRadius:16,padding:'6px 12px'}}>
+                <span style={{fontSize:13,fontWeight:600,color:'#57534E'}}>{tag}</span>
+                <button onClick={() => deleteTag(tag)} style={{color:'#C4B5A5',background:'none',border:'none',cursor:'pointer',fontSize:12,padding:'0 2px'}}>✕</button>
+              </div>
+            ))}
+            {cat.tags.length === 0 && <div style={{fontSize:12,color:'#C4B5A5'}}>暂无标签，添加一个吧</div>}
+          </div>
+        </div>
+      )}
+
+      <div style={{marginTop:20,display:'flex',gap:8}}>
+        <button onClick={() => { onSave(cats); onClose(); }} style={{flex:1,padding:'13px 0',background:'#6366F1',color:'#fff',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
+          保存
+        </button>
+        <button onClick={onClose} style={{flex:1,padding:'13px 0',background:'#F5F4F0',color:'#78716C',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
+          取消
+        </button>
+      </div>
+    </ModalWrap>
+  );
+};
+
+// ── 通用 Modal 包裹 ───────────────────────────────────
+const ModalWrap = ({ children, onClose, tall, bottom }) => (
+  <div className="fade-in" style={{position:'fixed',inset:0,background:'rgba(28,25,23,0.75)',display:'flex',alignItems: bottom?'flex-end':'center',justifyContent:'center',padding: bottom?0:24,zIndex:100,backdropFilter:'blur(8px)'}}>
+    <div className="slide-up" style={{background:'#fff',borderRadius: bottom?'28px 28px 0 0':'28px',width:'100%',maxWidth:440,padding:'28px 24px',maxHeight: tall?'90vh':'auto',overflowY: tall?'auto':'visible'}}>
+      {children}
+    </div>
+  </div>
+);
+
+// ── 通用按钮 ─────────────────────────────────────────
+const Btn = ({ children, onClick, color='#6366F1', textColor='#fff', disabled, style }) => (
+  <button onClick={onClick} disabled={disabled} className="active-scale" style={{
+    width:'100%', padding:'14px 0', background: disabled ? '#E8E5DF' : color, color: disabled ? '#A8A29E' : textColor,
+    borderRadius:16, fontSize:14, fontWeight:700, border:'none', cursor: disabled?'not-allowed':'pointer',
+    marginBottom:8, ...style,
+  }}>{children}</button>
+);
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
 </body>
 </html>
