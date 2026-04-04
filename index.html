@@ -25,39 +25,51 @@
         .fade-in { animation: fadeIn 0.2s ease both; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         .nav-tab { transition: all 0.2s ease; }
+        input[type="time"], input[type="date"] { font-family: 'DM Mono', monospace; }
     </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useCallback, useMemo } = React;
+const { useState, useEffect, useMemo } = React;
 
 const API_BASE = 'https://timetracker-api-chfnsbnnlv.cn-beijing.fcapp.run';
 
-// ── 默认分类和标签 ──────────────────────────────────────
 const DEFAULT_CATEGORIES = [
   { id: 'work',    name: '工作学习', color: '#6366F1', icon: '💼', tags: ['办公', '会议', '学习', '阅读'] },
   { id: 'life',    name: '日常生活', color: '#F59E0B', icon: '🏠', tags: ['用餐', '通勤', '洗漱', '家务'] },
-  { id: 'health',  name: '健康运动', color: '#10B981', icon: '💪', tags: ['健身', '跑步', '午休', '冥想'] },
+  { id: 'health',  name: '健康运动', color: '#10B981', icon: '💪', tags: ['健身', '跑步', '午休', '冥想', '睡眠'] },
   { id: 'leisure', name: '休闲娱乐', color: '#EC4899', icon: '🎮', tags: ['摸鱼', '刷手机', '看剧', '社交'] },
 ];
 
-// ── 工具函数 ───────────────────────────────────────────
+// ── 工具函数 ──────────────────────────────────────────
 const fmt = (ms) => {
+  if (ms < 0) ms = 0;
   const s = Math.floor((ms/1000)%60), m = Math.floor((ms/60000)%60), h = Math.floor(ms/3600000);
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 };
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'});
-const fmtDate = (ts) => new Date(ts).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}).replace('/','月').replace('/','日').slice(0,-1) + '日';
+const fmtTimeFull = (ts) => new Date(ts).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const dateKey = (ts) => new Date(ts).toLocaleDateString('zh-CN');
 const todayKey = () => dateKey(Date.now());
 
-const STORAGE_KEY = 'timetracker_v3';
+// 把 "HH:MM" 字符串 + 某天的日期 转成时间戳
+const timeStrToTs = (dateStr, timeStr) => {
+  // dateStr: 'YYYY-MM-DD', timeStr: 'HH:MM'
+  return new Date(`${dateStr}T${timeStr}:00`).getTime();
+};
+
+const todayDateStr = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
+
+const STORAGE_KEY = 'timetracker_v4';
 const SYNC_KEY = 'timetracker_last_sync';
 
-// ── 主应用 ─────────────────────────────────────────────
+// ── 主应用 ────────────────────────────────────────────
 const App = () => {
-  const [tab, setTab] = useState('today'); // today | history
+  const [tab, setTab] = useState('today');
   const [state, setState] = useState({
     isStarted: false,
     startTime: null,
@@ -66,16 +78,14 @@ const App = () => {
     selectedTag: '办公',
     categories: DEFAULT_CATEGORIES,
     todayLogs: [],
-    allDayLogs: {}, // { 'dateKey': [...logs] }
+    allDayLogs: {},
   });
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState({ show: false, msg: '' });
-  const [modal, setModal] = useState(null); // null | 'reset' | 'sync' | 'catMgr' | 'export' | 'dayDetail' | 'editTag'
+  const [modal, setModal] = useState(null);
   const [modalData, setModalData] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('');
-
-  // ── 历史日历状态 ──
   const [calYear, setCalYear] = useState(new Date().getFullYear());
   const [calMonth, setCalMonth] = useState(new Date().getMonth());
 
@@ -97,6 +107,11 @@ const App = () => {
     setTimeout(() => setToast({ show: false, msg: '' }), 2500);
   };
 
+  const getCatColor = (catId) => {
+    const cat = state.categories.find(c => c.id === catId);
+    return cat ? cat.color : '#94A3B8';
+  };
+
   // ── 今日操作 ──────────────────────────────────────────
   const startDay = () => {
     const t = Date.now();
@@ -107,13 +122,14 @@ const App = () => {
   const markMoment = () => {
     const t = Date.now();
     const ms = t - state.lastMarkTime;
-    const log = { start: state.lastMarkTime, end: t, durationMs: ms, durationStr: fmt(ms), tag: state.selectedTag, catId: state.selectedCatId };
+    const log = { id: Date.now(), start: state.lastMarkTime, end: t, durationMs: ms, durationStr: fmt(ms), tag: state.selectedTag, catId: state.selectedCatId };
     setState(p => ({ ...p, lastMarkTime: t, todayLogs: [...p.todayLogs, log] }));
     showToast(`📍 ${state.selectedTag} · ${fmt(ms)}`);
   };
 
   const deleteLog = (idx) => {
     setState(p => ({ ...p, todayLogs: p.todayLogs.filter((_,i) => i !== idx) }));
+    showToast('已删除');
   };
 
   const editLogTag = (idx, tag, catId) => {
@@ -125,6 +141,80 @@ const App = () => {
     setModal(null);
   };
 
+  // ── 【新功能1】拆分记录 ────────────────────────────────
+  // splitTime: 'HH:MM' 格式的字符串
+  const splitLog = (idx, splitTimeStr, firstTag, firstCatId, secondTag, secondCatId) => {
+    const log = state.todayLogs[idx];
+    // 把分割时间转成当天时间戳
+    const logDate = new Date(log.start);
+    const dateStr = `${logDate.getFullYear()}-${String(logDate.getMonth()+1).padStart(2,'0')}-${String(logDate.getDate()).padStart(2,'0')}`;
+    const splitTs = timeStrToTs(dateStr, splitTimeStr);
+
+    if (splitTs <= log.start || splitTs >= log.end) {
+      showToast('⚠️ 分割时间必须在记录范围内');
+      return false;
+    }
+
+    const ms1 = splitTs - log.start;
+    const ms2 = log.end - splitTs;
+    const log1 = { id: Date.now(),     start: log.start, end: splitTs, durationMs: ms1, durationStr: fmt(ms1), tag: firstTag,  catId: firstCatId };
+    const log2 = { id: Date.now()+1,   start: splitTs,   end: log.end, durationMs: ms2, durationStr: fmt(ms2), tag: secondTag, catId: secondCatId };
+
+    setState(p => {
+      const logs = [...p.todayLogs];
+      logs.splice(idx, 1, log1, log2);
+      return { ...p, todayLogs: logs };
+    });
+    setModal(null);
+    showToast(`✂️ 已拆分为 ${fmt(ms1)} + ${fmt(ms2)}`);
+    return true;
+  };
+
+  // ── 【新功能2】手动补录记录 ───────────────────────────
+  // 支持补录到今日或历史某天
+  const addManualLog = (dateStr, startTimeStr, endTimeStr, tag, catId) => {
+    const startTs = timeStrToTs(dateStr, startTimeStr);
+    const endTs   = timeStrToTs(dateStr, endTimeStr);
+
+    // 处理跨午夜（比如23:00-07:00表示睡眠）
+    let adjustedEnd = endTs;
+    if (endTs <= startTs) {
+      adjustedEnd = endTs + 24 * 3600 * 1000; // 加一天
+    }
+
+    const ms = adjustedEnd - startTs;
+    if (ms <= 0) { showToast('⚠️ 结束时间必须晚于开始时间'); return false; }
+
+    const log = {
+      id: Date.now(),
+      start: startTs, end: adjustedEnd,
+      durationMs: ms, durationStr: fmt(ms),
+      tag, catId,
+      manual: true, // 标记为手动补录
+    };
+
+    const dk = dateKey(startTs);
+    const isToday = dk === todayKey();
+
+    if (isToday) {
+      setState(p => {
+        const logs = [...p.todayLogs, log].sort((a,b) => a.start - b.start);
+        return { ...p, todayLogs: logs };
+      });
+    } else {
+      setState(p => {
+        const existing = p.allDayLogs[dk] || [];
+        const logs = [...existing, log].sort((a,b) => a.start - b.start);
+        return { ...p, allDayLogs: { ...p.allDayLogs, [dk]: logs } };
+      });
+    }
+
+    setModal(null);
+    showToast(`➕ 已补录 · ${tag} · ${fmt(ms)}`);
+    return true;
+  };
+
+  // ── 结算 ──────────────────────────────────────────────
   const handleReset = () => {
     const dk = todayKey();
     setState(p => ({
@@ -136,20 +226,11 @@ const App = () => {
     showToast('✅ 已归档今日记录');
   };
 
-  // ── 分类/标签管理 ─────────────────────────────────────
-  const getCatColor = (catId) => {
-    const cat = state.categories.find(c => c.id === catId);
-    return cat ? cat.color : '#94A3B8';
-  };
-
-  const updateCategories = (cats) => setState(p => ({ ...p, categories: cats }));
-
   // ── 云同步 ────────────────────────────────────────────
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const allTags = state.categories.flatMap(c => c.tags);
-      await fetch(`${API_BASE}/tags`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tags: allTags, categories: state.categories }) });
+      await fetch(`${API_BASE}/tags`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ categories: state.categories }) });
       for (const log of state.todayLogs) {
         await fetch(`${API_BASE}/logs`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ log }) });
       }
@@ -160,33 +241,32 @@ const App = () => {
     setSyncing(false); setModal(null);
   };
 
-  // ── 导出 CSV ──────────────────────────────────────────
+  // ── 导出 ──────────────────────────────────────────────
   const handleExport = (range) => {
     const allLogs = { ...state.allDayLogs, [todayKey()]: state.todayLogs };
-    const now = Date.now();
-    const cutoffs = { today: Date.now()-86400000, week: now-7*86400000, month: now-30*86400000, all: 0 };
+    const n = Date.now();
+    const cutoffs = { today: n-86400000, week: n-7*86400000, month: n-30*86400000, all: 0 };
     const cutoff = cutoffs[range] || 0;
     let rows = [];
     Object.entries(allLogs).forEach(([dk, logs]) => {
-      if (!logs || logs.length === 0) return;
-      const dayTs = new Date(dk).getTime();
-      if (dayTs < cutoff && range !== 'all') return;
+      if (!logs || !logs.length) return;
+      if (new Date(dk).getTime() < cutoff && range !== 'all') return;
       logs.forEach(l => rows.push({ date: dk, ...l }));
     });
-    if (rows.length === 0) { showToast('该范围内暂无数据'); setModal(null); return; }
-    let csv = '\uFEFF日期,开始,结束,时长,标签,分类\n';
+    if (!rows.length) { showToast('该范围内暂无数据'); setModal(null); return; }
+    let csv = '\uFEFF日期,开始,结束,时长,标签,分类,补录\n';
     rows.forEach(r => {
       const cat = state.categories.find(c => c.id === r.catId);
-      csv += `${r.date},${fmtTime(r.start)},${fmtTime(r.end)},${r.durationStr},${r.tag},${cat ? cat.name : ''}\n`;
+      csv += `${r.date},${fmtTime(r.start)},${fmtTime(r.end)},${r.durationStr},${r.tag},${cat?cat.name:''},${r.manual?'是':''}\n`;
     });
-    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
     const labels = { today:'今日', week:'近7天', month:'本月', all:'全部' };
     a.download = `时光足迹_${labels[range]}_${new Date().toLocaleDateString()}.csv`;
     a.click(); setModal(null); showToast('📊 导出成功');
   };
 
-  // ── 日历数据 ──────────────────────────────────────────
+  // ── 日历 ──────────────────────────────────────────────
   const calDays = useMemo(() => {
     const first = new Date(calYear, calMonth, 1).getDay();
     const last = new Date(calYear, calMonth+1, 0).getDate();
@@ -196,32 +276,21 @@ const App = () => {
     return cells;
   }, [calYear, calMonth]);
 
-  const hasDayData = (d) => {
-    if (!d) return false;
-    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
-    const isToday = dk === todayKey();
-    if (isToday) return state.todayLogs.length > 0;
-    return state.allDayLogs[dk] && state.allDayLogs[dk].length > 0;
-  };
-
   const getDayLogs = (d) => {
     const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
     if (dk === todayKey()) return state.todayLogs;
     return state.allDayLogs[dk] || [];
   };
 
-  const isToday = (d) => {
-    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
-    return dk === todayKey();
-  };
+  const isToday = (d) => new Date(calYear, calMonth, d).toLocaleDateString('zh-CN') === todayKey();
 
-  // ── 渲染 ──────────────────────────────────────────────
   const selectedCat = state.categories.find(c => c.id === state.selectedCatId) || state.categories[0];
 
+  // ── 渲染 ──────────────────────────────────────────────
   return (
-    <div style={{maxWidth:480,margin:'0 auto',minHeight:'100vh',position:'relative',paddingBottom:100}}>
+    <div style={{maxWidth:480,margin:'0 auto',minHeight:'100vh',paddingBottom:110}}>
 
-      {/* ── Header ── */}
+      {/* Header */}
       <div style={{padding:'20px 20px 0',display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
         <div>
           <div style={{fontSize:22,fontWeight:900,color:'#1C1917',letterSpacing:'-0.5px'}}>时光足迹</div>
@@ -229,29 +298,30 @@ const App = () => {
             {new Date().toLocaleDateString('zh-CN',{weekday:'long',month:'long',day:'numeric'})}
           </div>
         </div>
-        <button onClick={() => setModal('reset')} style={{fontSize:11,background:'#FEF2F2',color:'#EF4444',padding:'6px 14px',borderRadius:20,fontWeight:700,border:'1px solid #FECACA'}} className="active-scale">
-          结算今日
-        </button>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <button onClick={() => setModal('addLog')} style={{fontSize:11,background:'#EEF2FF',color:'#6366F1',padding:'6px 12px',borderRadius:20,fontWeight:700,border:'none',cursor:'pointer'}} className="active-scale">
+            ➕ 补录
+          </button>
+          <button onClick={() => setModal('reset')} style={{fontSize:11,background:'#FEF2F2',color:'#EF4444',padding:'6px 12px',borderRadius:20,fontWeight:700,border:'1px solid #FECACA'}} className="active-scale">
+            结算
+          </button>
+        </div>
       </div>
 
-      {/* ── Tab Nav ── */}
+      {/* Tab */}
       <div style={{display:'flex',gap:4,margin:'16px 20px 0',background:'#E8E5DF',borderRadius:16,padding:4}}>
         {[['today','⏱ 今日记录'],['history','📅 历史回顾']].map(([t,label]) => (
           <button key={t} onClick={() => setTab(t)} className="nav-tab" style={{
-            flex:1, padding:'9px 0', borderRadius:12, fontSize:12, fontWeight:700,
-            background: tab===t ? '#fff' : 'transparent',
-            color: tab===t ? '#1C1917' : '#A8A29E',
-            boxShadow: tab===t ? '0 1px 4px rgba(0,0,0,0.1)' : 'none',
+            flex:1,padding:'9px 0',borderRadius:12,fontSize:12,fontWeight:700,border:'none',cursor:'pointer',
+            background: tab===t?'#fff':'transparent', color: tab===t?'#1C1917':'#A8A29E',
+            boxShadow: tab===t?'0 1px 4px rgba(0,0,0,0.1)':'none',
           }}>{label}</button>
         ))}
       </div>
 
-      {/* ════════════════════════════════════
-          TAB: 今日记录
-      ════════════════════════════════════ */}
+      {/* ═══ TAB: 今日 ═══ */}
       {tab === 'today' && (
         <div className="fade-in" style={{padding:'16px 20px 0'}}>
-
           {/* 计时卡片 */}
           <div style={{background:'#1C1917',borderRadius:28,padding:'28px 24px',textAlign:'center',marginBottom:16}}>
             <div style={{fontSize:10,color:'#78716C',fontWeight:700,letterSpacing:3,textTransform:'uppercase',marginBottom:6}}>今日总清醒</div>
@@ -260,58 +330,50 @@ const App = () => {
             </div>
             <div style={{height:1,background:'#292524',margin:'20px 0'}}></div>
             <div style={{fontSize:10,color:'#78716C',fontWeight:700,letterSpacing:3,textTransform:'uppercase',marginBottom:6}}>当前阶段</div>
-            <div className="mono" style={{fontSize:32,fontWeight:500,color: selectedCat.color, letterSpacing:-1}}>
+            <div className="mono" style={{fontSize:32,fontWeight:500,color:selectedCat.color,letterSpacing:-1}}>
               {state.isStarted ? fmt(now - state.lastMarkTime) : '00:00:00'}
             </div>
           </div>
 
-          {/* 开启按钮 / 标签+记录按钮 */}
           {!state.isStarted ? (
             <button onClick={startDay} className="active-scale" style={{width:'100%',padding:'24px 0',background:'#6366F1',color:'#fff',borderRadius:24,fontSize:18,fontWeight:900,border:'none',cursor:'pointer',marginBottom:16}}>
               ☀️ 开启新的一天
             </button>
           ) : (
             <div style={{marginBottom:16}}>
-              {/* 分类标签选择器 */}
-              <div style={{marginBottom:12}}>
-                {state.categories.map((cat, ci) => (
-                  <div key={cat.id} style={{marginBottom: ci < state.categories.length-1 ? 16 : 0}}>
-                    {/* 分类标题行 */}
-                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,paddingLeft:2}}>
-                      <span style={{fontSize:13}}>{cat.icon}</span>
-                      <span style={{fontSize:11,fontWeight:700,color:'#A8A29E',textTransform:'uppercase',letterSpacing:1}}>{cat.name}</span>
-                      <div style={{flex:1,height:1,background:'#E8E5DF',marginLeft:4}}></div>
-                    </div>
-                    {/* 标签行 */}
-                    <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
-                      {cat.tags.map(tag => {
-                        const active = state.selectedTag === tag && state.selectedCatId === cat.id;
-                        return (
-                          <button key={tag} className="tag-pill" onClick={() => setState(p => ({...p, selectedTag: tag, selectedCatId: cat.id}))}
-                            style={{
-                              padding:'9px 18px', borderRadius:20, fontSize:13, fontWeight:600, border:'none', cursor:'pointer',
-                              background: active ? cat.color : '#fff',
-                              color: active ? '#fff' : '#57534E',
-                              boxShadow: active ? `0 4px 14px ${cat.color}40` : '0 1px 3px rgba(0,0,0,0.08)',
-                              transform: active ? 'scale(1.04)' : 'scale(1)',
-                            }}>{tag}</button>
-                        );
-                      })}
-                    </div>
+              {/* 分类标签 */}
+              {state.categories.map((cat, ci) => (
+                <div key={cat.id} style={{marginBottom: ci < state.categories.length-1 ? 16 : 0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,paddingLeft:2}}>
+                    <span style={{fontSize:13}}>{cat.icon}</span>
+                    <span style={{fontSize:11,fontWeight:700,color:'#A8A29E',textTransform:'uppercase',letterSpacing:1}}>{cat.name}</span>
+                    <div style={{flex:1,height:1,background:'#E8E5DF',marginLeft:4}}></div>
                   </div>
-                ))}
-                {/* 管理分类按钮 */}
-                <button onClick={() => setModal('catMgr')} style={{marginTop:12,fontSize:11,color:'#6366F1',fontWeight:700,background:'#EEF2FF',padding:'6px 14px',borderRadius:12,border:'none',cursor:'pointer'}} className="active-scale">
-                  ⚙️ 管理分类和标签
-                </button>
-              </div>
+                  <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+                    {cat.tags.map(tag => {
+                      const active = state.selectedTag === tag && state.selectedCatId === cat.id;
+                      return (
+                        <button key={tag} className="tag-pill" onClick={() => setState(p => ({...p,selectedTag:tag,selectedCatId:cat.id}))}
+                          style={{padding:'9px 18px',borderRadius:20,fontSize:13,fontWeight:600,border:'none',cursor:'pointer',
+                            background: active ? cat.color : '#fff', color: active ? '#fff' : '#57534E',
+                            boxShadow: active ? `0 4px 14px ${cat.color}40` : '0 1px 3px rgba(0,0,0,0.08)',
+                            transform: active ? 'scale(1.04)' : 'scale(1)',
+                          }}>{tag}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              <button onClick={() => setModal('catMgr')} style={{marginTop:12,fontSize:11,color:'#6366F1',fontWeight:700,background:'#EEF2FF',padding:'6px 14px',borderRadius:12,border:'none',cursor:'pointer'}} className="active-scale">
+                ⚙️ 管理分类和标签
+              </button>
 
               {/* 记录按钮 */}
               <button onClick={markMoment} className="active-scale" style={{
-                width:'100%', padding:'28px 0', borderRadius:28, border:'none', cursor:'pointer',
-                background: selectedCat.color, color:'#fff', fontSize:18, fontWeight:900,
-                boxShadow: `0 8px 24px ${selectedCat.color}50`,
-                display:'flex', flexDirection:'column', alignItems:'center', gap:4,
+                width:'100%',padding:'28px 0',borderRadius:28,border:'none',cursor:'pointer',marginTop:16,
+                background:selectedCat.color,color:'#fff',fontSize:18,fontWeight:900,
+                boxShadow:`0 8px 24px ${selectedCat.color}50`,
+                display:'flex',flexDirection:'column',alignItems:'center',gap:4,
               }}>
                 <span>📍 记录并开始下一段</span>
                 <span style={{fontSize:11,opacity:0.75,fontWeight:500}}>{selectedCat.icon} {state.selectedTag}</span>
@@ -326,69 +388,48 @@ const App = () => {
             </div>
             {state.todayLogs.length === 0 ? (
               <div style={{textAlign:'center',padding:'32px 0',color:'#C4B5A5',fontSize:13,fontWeight:500,border:'2px dashed #E8E5DF',borderRadius:20}}>
-                暂无记录，点击上方开始计时
+                暂无记录
               </div>
             ) : [...state.todayLogs].reverse().map((log, rIdx) => {
               const realIdx = state.todayLogs.length - 1 - rIdx;
               const color = getCatColor(log.catId);
               return (
-                <div key={rIdx} className="slide-up" style={{background:'#fff',borderRadius:20,padding:'14px 16px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:10}}>
-                    <div style={{width:4,height:40,borderRadius:4,background:color,flexShrink:0}}></div>
-                    <div>
-                      <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3}}>
-                        <span onClick={() => { setModalData({idx:realIdx}); setModal('editTag'); }}
-                          style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'2px 8px',borderRadius:8,cursor:'pointer'}}>
-                          {log.tag} ✎
-                        </span>
-                        <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{fmtTime(log.start)} – {fmtTime(log.end)}</span>
-                      </div>
-                      <div className="mono" style={{fontSize:20,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
-                    </div>
-                  </div>
-                  <button onClick={() => { if(confirm('删除这条记录？')) deleteLog(realIdx); }} style={{color:'#E2DDD8',fontSize:16,background:'none',border:'none',cursor:'pointer',padding:8}}>✕</button>
-                </div>
+                <LogCard key={log.id || rIdx} log={log} color={color} realIdx={realIdx}
+                  onEditTag={() => { setModalData({idx:realIdx,log}); setModal('editTag'); }}
+                  onSplit={() => { setModalData({idx:realIdx,log}); setModal('splitLog'); }}
+                  onDelete={() => { if(confirm('删除这条记录？')) deleteLog(realIdx); }}
+                />
               );
             })}
           </div>
         </div>
       )}
 
-      {/* ════════════════════════════════════
-          TAB: 历史回顾
-      ════════════════════════════════════ */}
+      {/* ═══ TAB: 历史 ═══ */}
       {tab === 'history' && (
         <div className="fade-in" style={{padding:'16px 20px 0'}}>
-          {/* 日历头 */}
           <div style={{background:'#fff',borderRadius:24,padding:'20px',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
               <button onClick={() => { let m=calMonth-1,y=calYear; if(m<0){m=11;y--;} setCalMonth(m);setCalYear(y); }} style={{background:'#F5F4F0',border:'none',width:32,height:32,borderRadius:10,fontSize:16,cursor:'pointer'}} className="active-scale">←</button>
               <span style={{fontWeight:900,fontSize:15,color:'#1C1917'}}>{calYear}年{calMonth+1}月</span>
               <button onClick={() => { let m=calMonth+1,y=calYear; if(m>11){m=0;y++;} setCalMonth(m);setCalYear(y); }} style={{background:'#F5F4F0',border:'none',width:32,height:32,borderRadius:10,fontSize:16,cursor:'pointer'}} className="active-scale">→</button>
             </div>
-            {/* 星期头 */}
             <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',textAlign:'center',marginBottom:8}}>
               {['日','一','二','三','四','五','六'].map(d => (
                 <div key={d} style={{fontSize:11,fontWeight:700,color:'#C4B5A5',padding:'4px 0'}}>{d}</div>
               ))}
             </div>
-            {/* 日期格子 */}
             <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:4}}>
               {calDays.map((d, i) => {
-                const hasData = hasDayData(d);
-                const isTd = d && isToday(d);
-                const dk = d ? new Date(calYear, calMonth, d).toLocaleDateString('zh-CN') : '';
                 const logs = d ? getDayLogs(d) : [];
-                // get unique cat colors for dots
+                const hasData = logs.length > 0;
+                const isTd = d && isToday(d);
                 const catColors = [...new Set(logs.map(l => l.catId))].slice(0,3).map(getCatColor);
                 return (
-                  <div key={i} onClick={() => { if(d && hasData) { setModalData({ d, dk, logs }); setModal('dayDetail'); } }}
-                    style={{
-                      aspectRatio:'1', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
-                      borderRadius:12, cursor: hasData ? 'pointer' : 'default',
-                      background: isTd ? '#6366F1' : hasData ? '#F0F0FF' : 'transparent',
-                      position:'relative',
-                    }}>
+                  <div key={i} onClick={() => { if(d && hasData) { setModalData({d, logs}); setModal('dayDetail'); } }}
+                    style={{aspectRatio:'1',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+                      borderRadius:12,cursor:hasData?'pointer':'default',
+                      background: isTd?'#6366F1':hasData?'#F0F0FF':'transparent'}}>
                     {d && <span style={{fontSize:13,fontWeight:isTd?900:500,color:isTd?'#fff':hasData?'#4338CA':'#78716C'}}>{d}</span>}
                     {hasData && !isTd && (
                       <div style={{display:'flex',gap:2,marginTop:2}}>
@@ -402,12 +443,12 @@ const App = () => {
             </div>
           </div>
           <div style={{marginTop:12,fontSize:11,color:'#C4B5A5',textAlign:'center',fontWeight:500}}>
-            有色点代表当天有记录，点击查看详情
+            点击有记录的日期查看详情
           </div>
         </div>
       )}
 
-      {/* ── 底部操作栏 ── */}
+      {/* 底部操作栏 */}
       <div className="glass" style={{position:'fixed',bottom:16,left:16,right:16,maxWidth:448,margin:'0 auto',borderRadius:20,padding:8,display:'flex',gap:8,boxShadow:'0 4px 24px rgba(0,0,0,0.12)',zIndex:40}}>
         <button onClick={() => setModal('export')} className="active-scale" style={{flex:1,padding:'11px 0',background:'#292524',color:'#fff',borderRadius:14,fontSize:12,fontWeight:700,border:'none',cursor:'pointer'}}>
           📊 导出数据
@@ -420,14 +461,13 @@ const App = () => {
 
       {/* ════ MODALS ════ */}
 
-      {/* 结算确认 */}
+      {/* 结算 */}
       {modal === 'reset' && (
         <ModalWrap onClose={() => setModal(null)}>
           <div style={{textAlign:'center',marginBottom:20}}>
             <div style={{fontSize:40,marginBottom:8}}>🌙</div>
-            <div style={{fontSize:20,fontWeight:900,color:'#1C1917'}}>结算今日？</div>
-            <div style={{fontSize:12,color:'#A8A29E',marginTop:6}}>今日 {state.todayLogs.length} 条记录将归档到历史</div>
-            <div style={{fontSize:11,color:'#C4B5A5',marginTop:4}}>建议先同步云端再结算</div>
+            <div style={{fontSize:20,fontWeight:900}}>结算今日？</div>
+            <div style={{fontSize:12,color:'#A8A29E',marginTop:6}}>{state.todayLogs.length} 条记录将归档到历史</div>
           </div>
           <Btn color="#EF4444" onClick={handleReset}>确认归档结算</Btn>
           <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
@@ -448,15 +488,13 @@ const App = () => {
         </ModalWrap>
       )}
 
-      {/* 导出选择 */}
+      {/* 导出 */}
       {modal === 'export' && (
         <ModalWrap onClose={() => setModal(null)}>
           <div style={{fontSize:18,fontWeight:900,marginBottom:6}}>选择导出范围</div>
           <div style={{fontSize:12,color:'#A8A29E',marginBottom:20}}>将生成 Excel 可读的 CSV 文件</div>
           {[['today','📅 仅今日'],['week','📆 最近 7 天'],['month','🗓 本月（30天）'],['all','📚 全部历史']].map(([k,label]) => (
-            <Btn key={k} color="#F5F4F0" textColor="#1C1917" onClick={() => handleExport(k)} style={{marginBottom:8,textAlign:'left',paddingLeft:20}}>
-              {label}
-            </Btn>
+            <Btn key={k} color="#F5F4F0" textColor="#1C1917" onClick={() => handleExport(k)}>{label}</Btn>
           ))}
           <Btn color="#E8E5DF" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
         </ModalWrap>
@@ -466,10 +504,10 @@ const App = () => {
       {modal === 'dayDetail' && modalData && (
         <ModalWrap onClose={() => setModal(null)} tall>
           <div style={{fontSize:16,fontWeight:900,marginBottom:4}}>
-            {fmtDate(new Date(calYear, calMonth, modalData.d).getTime())} 记录
+            {new Date(calYear, calMonth, modalData.d).toLocaleDateString('zh-CN',{month:'long',day:'numeric'})}
           </div>
-          <div style={{fontSize:11,color:'#A8A29E',marginBottom:16}}>{modalData.logs.length} 段时间记录</div>
-          <div style={{maxHeight:'55vh',overflowY:'auto'}}>
+          <div style={{fontSize:11,color:'#A8A29E',marginBottom:16}}>{modalData.logs.length} 段记录</div>
+          <div style={{maxHeight:'60vh',overflowY:'auto'}}>
             {modalData.logs.map((log, i) => {
               const color = getCatColor(log.catId);
               return (
@@ -478,6 +516,7 @@ const App = () => {
                   <div style={{flex:1}}>
                     <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
                       <span style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'1px 7px',borderRadius:6}}>{log.tag}</span>
+                      {log.manual && <span style={{fontSize:9,color:'#A8A29E',background:'#F5F4F0',padding:'1px 5px',borderRadius:4}}>补录</span>}
                       <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{fmtTime(log.start)}–{fmtTime(log.end)}</span>
                     </div>
                     <div className="mono" style={{fontSize:17,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
@@ -492,11 +531,14 @@ const App = () => {
         </ModalWrap>
       )}
 
-      {/* 修改记录标签 */}
+      {/* 修改标签 */}
       {modal === 'editTag' && modalData && (
         <ModalWrap onClose={() => setModal(null)} bottom>
-          <div style={{fontSize:16,fontWeight:900,marginBottom:16}}>修改标签</div>
-          <div style={{maxHeight:'60vh',overflowY:'auto'}}>
+          <div style={{fontSize:16,fontWeight:900,marginBottom:4}}>修改标签</div>
+          <div className="mono" style={{fontSize:11,color:'#A8A29E',marginBottom:16}}>
+            {fmtTime(modalData.log.start)} – {fmtTime(modalData.log.end)} · {modalData.log.durationStr}
+          </div>
+          <div style={{maxHeight:'55vh',overflowY:'auto'}}>
             {state.categories.map((cat, ci) => (
               <div key={cat.id} style={{marginBottom: ci < state.categories.length-1 ? 20 : 0}}>
                 <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8}}>
@@ -515,24 +557,253 @@ const App = () => {
               </div>
             ))}
           </div>
-          <div style={{marginTop:16}}>
-            <Btn color="#F5F4F0" textColor="#78716C" onClick={() => setModal(null)}>取消</Btn>
+          <div style={{marginTop:16,display:'flex',gap:8}}>
+            <button onClick={() => { setModal('splitLog'); }} style={{flex:1,padding:'12px 0',background:'#FFF7ED',color:'#F59E0B',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>
+              ✂️ 拆分这条
+            </button>
+            <button onClick={() => setModal(null)} style={{flex:1,padding:'12px 0',background:'#F5F4F0',color:'#78716C',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>
+              取消
+            </button>
           </div>
         </ModalWrap>
       )}
 
-      {/* 分类和标签管理 */}
+      {/* ✂️ 拆分记录 Modal */}
+      {modal === 'splitLog' && modalData && (
+        <SplitLogModal
+          log={modalData.log}
+          idx={modalData.idx}
+          categories={state.categories}
+          onSplit={splitLog}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {/* ➕ 手动补录 Modal */}
+      {modal === 'addLog' && (
+        <AddLogModal
+          categories={state.categories}
+          onAdd={addManualLog}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {/* 分类管理 */}
       {modal === 'catMgr' && (
-        <CatMgrModal categories={state.categories} onSave={updateCategories} onClose={() => setModal(null)} />
+        <CatMgrModal categories={state.categories}
+          onSave={(cats) => setState(p => ({...p, categories: cats}))}
+          onClose={() => setModal(null)} />
       )}
 
       {/* Toast */}
       <div style={{
-        position:'fixed', bottom:90, left:'50%', transform:'translateX(-50%)',
-        background:'#1C1917', color:'#fff', padding:'10px 20px', borderRadius:24,
-        fontSize:12, fontWeight:700, zIndex:200, whiteSpace:'nowrap',
-        transition:'opacity 0.2s', opacity: toast.show ? 1 : 0, pointerEvents:'none',
+        position:'fixed',bottom:90,left:'50%',transform:'translateX(-50%)',
+        background:'#1C1917',color:'#fff',padding:'10px 20px',borderRadius:24,
+        fontSize:12,fontWeight:700,zIndex:200,whiteSpace:'nowrap',
+        transition:'opacity 0.2s',opacity:toast.show?1:0,pointerEvents:'none',
       }}>{toast.msg}</div>
+    </div>
+  );
+};
+
+// ── 记录卡片组件 ──────────────────────────────────────
+const LogCard = ({ log, color, realIdx, onEditTag, onSplit, onDelete }) => (
+  <div className="slide-up" style={{background:'#fff',borderRadius:20,padding:'14px 16px',marginBottom:10,display:'flex',justifyContent:'space-between',alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.06)'}}>
+    <div style={{display:'flex',alignItems:'center',gap:10,flex:1}}>
+      <div style={{width:4,height:44,borderRadius:4,background:color,flexShrink:0}}></div>
+      <div style={{flex:1}}>
+        <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
+          <span onClick={onEditTag} style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'2px 8px',borderRadius:8,cursor:'pointer'}}>
+            {log.tag} ✎
+          </span>
+          {log.manual && <span style={{fontSize:9,color:'#A8A29E',background:'#F5F4F0',padding:'2px 6px',borderRadius:4}}>补录</span>}
+          <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{new Date(log.start).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'})} – {new Date(log.end).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'})}</span>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div className="mono" style={{fontSize:20,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
+          <button onClick={onSplit} style={{fontSize:10,color:'#F59E0B',background:'#FFF7ED',padding:'3px 8px',borderRadius:8,border:'none',cursor:'pointer',fontWeight:700}}>✂️ 拆分</button>
+        </div>
+      </div>
+    </div>
+    <button onClick={onDelete} style={{color:'#E2DDD8',fontSize:16,background:'none',border:'none',cursor:'pointer',padding:8,flexShrink:0}}>✕</button>
+  </div>
+);
+
+// ── ✂️ 拆分记录 Modal ─────────────────────────────────
+const SplitLogModal = ({ log, idx, categories, onSplit, onClose }) => {
+  const logDate = new Date(log.start);
+  const defaultSplitTime = (() => {
+    const mid = new Date((log.start + log.end) / 2);
+    return `${String(mid.getHours()).padStart(2,'0')}:${String(mid.getMinutes()).padStart(2,'0')}`;
+  })();
+
+  const [splitTime, setSplitTime] = useState(defaultSplitTime);
+  const [firstCatId, setFirstCatId] = useState(log.catId || categories[0]?.id);
+  const [firstTag, setFirstTag] = useState(log.tag || categories[0]?.tags[0]);
+  const [secondCatId, setSecondCatId] = useState(log.catId || categories[0]?.id);
+  const [secondTag, setSecondTag] = useState(log.tag || categories[0]?.tags[0]);
+
+  const firstCat = categories.find(c => c.id === firstCatId) || categories[0];
+  const secondCat = categories.find(c => c.id === secondCatId) || categories[0];
+
+  // 预览时长
+  const logDate2 = new Date(log.start);
+  const dateStr = `${logDate2.getFullYear()}-${String(logDate2.getMonth()+1).padStart(2,'0')}-${String(logDate2.getDate()).padStart(2,'0')}`;
+  const splitTs = timeStrToTs(dateStr, splitTime);
+  const ms1 = splitTs - log.start;
+  const ms2 = log.end - splitTs;
+  const valid = splitTs > log.start && splitTs < log.end;
+
+  return (
+    <ModalWrap onClose={onClose} tall>
+      <div style={{fontSize:17,fontWeight:900,marginBottom:4}}>✂️ 拆分记录</div>
+      <div className="mono" style={{fontSize:11,color:'#A8A29E',marginBottom:20}}>
+        原始：{new Date(log.start).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'})} – {new Date(log.end).toLocaleTimeString('zh-CN',{hour12:false,hour:'2-digit',minute:'2-digit'})} · {log.durationStr}
+      </div>
+
+      {/* 分割时间 */}
+      <div style={{marginBottom:20}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#78716C',marginBottom:8}}>在哪个时间点分割？</div>
+        <input type="time" value={splitTime} onChange={e => setSplitTime(e.target.value)}
+          style={{width:'100%',padding:'12px 16px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:16,outline:'none',background:'#FAFAF9',textAlign:'center'}} />
+        {valid ? (
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <div style={{flex:1,textAlign:'center',padding:'8px',background:'#F0FDF4',borderRadius:10}}>
+              <div style={{fontSize:10,color:'#86EFAC',fontWeight:700}}>第一段</div>
+              <div className="mono" style={{fontSize:14,fontWeight:700,color:'#16A34A'}}>{fmt(ms1)}</div>
+            </div>
+            <div style={{flex:1,textAlign:'center',padding:'8px',background:'#EFF6FF',borderRadius:10}}>
+              <div style={{fontSize:10,color:'#93C5FD',fontWeight:700}}>第二段</div>
+              <div className="mono" style={{fontSize:14,fontWeight:700,color:'#2563EB'}}>{fmt(ms2)}</div>
+            </div>
+          </div>
+        ) : (
+          <div style={{fontSize:11,color:'#EF4444',marginTop:6,textAlign:'center'}}>请选择在原记录时间范围内的时间点</div>
+        )}
+      </div>
+
+      {/* 第一段标签 */}
+      <TagPicker label="第一段标签" categories={categories} catId={firstCatId} tag={firstTag}
+        onSelect={(tag, catId) => { setFirstTag(tag); setFirstCatId(catId); }} color="#16A34A" />
+
+      <div style={{height:1,background:'#F5F4F0',margin:'16px 0'}}></div>
+
+      {/* 第二段标签 */}
+      <TagPicker label="第二段标签" categories={categories} catId={secondCatId} tag={secondTag}
+        onSelect={(tag, catId) => { setSecondTag(tag); setSecondCatId(catId); }} color="#2563EB" />
+
+      <div style={{marginTop:20,display:'flex',gap:8}}>
+        <button onClick={() => onSplit(idx, splitTime, firstTag, firstCatId, secondTag, secondCatId)}
+          disabled={!valid}
+          style={{flex:1,padding:'13px 0',background:valid?'#6366F1':'#E8E5DF',color:valid?'#fff':'#A8A29E',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:valid?'pointer':'not-allowed'}}>
+          确认拆分
+        </button>
+        <button onClick={onClose} style={{flex:1,padding:'13px 0',background:'#F5F4F0',color:'#78716C',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
+          取消
+        </button>
+      </div>
+    </ModalWrap>
+  );
+};
+
+// ── ➕ 手动补录 Modal ─────────────────────────────────
+const AddLogModal = ({ categories, onAdd, onClose }) => {
+  const [dateStr, setDateStr] = useState(todayDateStr());
+  const [startTime, setStartTime] = useState('23:00');
+  const [endTime, setEndTime] = useState('07:00');
+  const [catId, setCatId] = useState(categories[2]?.id || categories[0]?.id); // 默认健康
+  const [tag, setTag] = useState('睡眠');
+
+  const cat = categories.find(c => c.id === catId) || categories[0];
+
+  // 预览时长
+  const startTs = timeStrToTs(dateStr, startTime);
+  let endTs = timeStrToTs(dateStr, endTime);
+  if (endTs <= startTs) endTs += 86400000;
+  const ms = endTs - startTs;
+  const previewValid = ms > 0 && ms < 30 * 3600000; // 最多30小时
+
+  return (
+    <ModalWrap onClose={onClose} tall>
+      <div style={{fontSize:17,fontWeight:900,marginBottom:4}}>➕ 手动补录记录</div>
+      <div style={{fontSize:12,color:'#A8A29E',marginBottom:20}}>用于补录睡眠、或漏记的时间段</div>
+
+      {/* 日期 */}
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#78716C',marginBottom:8}}>日期</div>
+        <input type="date" value={dateStr} onChange={e => setDateStr(e.target.value)}
+          style={{width:'100%',padding:'12px 16px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:14,outline:'none',background:'#FAFAF9'}} />
+      </div>
+
+      {/* 时间段 */}
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#78716C',marginBottom:8}}>时间段</div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)}
+            style={{flex:1,padding:'12px 10px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:15,outline:'none',background:'#FAFAF9',textAlign:'center'}} />
+          <span style={{color:'#C4B5A5',fontWeight:700}}>→</span>
+          <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)}
+            style={{flex:1,padding:'12px 10px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:15,outline:'none',background:'#FAFAF9',textAlign:'center'}} />
+        </div>
+        {previewValid ? (
+          <div style={{marginTop:8,textAlign:'center',padding:'8px',background:'#F0F9FF',borderRadius:10}}>
+            <span className="mono" style={{fontSize:15,fontWeight:700,color:'#0369A1'}}>时长：{fmt(ms)}</span>
+            {endTs > startTs + 86400000*0 && endTime <= startTime &&
+              <span style={{fontSize:10,color:'#94A3B8',marginLeft:6}}>（跨天至次日）</span>}
+          </div>
+        ) : ms > 30*3600000 ? (
+          <div style={{fontSize:11,color:'#EF4444',marginTop:6,textAlign:'center'}}>时长超过30小时，请检查时间</div>
+        ) : null}
+      </div>
+
+      {/* 标签选择 */}
+      <TagPicker label="标签" categories={categories} catId={catId} tag={tag}
+        onSelect={(t, c) => { setTag(t); setCatId(c); }} color="#6366F1" />
+
+      <div style={{marginTop:20,display:'flex',gap:8}}>
+        <button onClick={() => onAdd(dateStr, startTime, endTime, tag, catId)}
+          disabled={!previewValid}
+          style={{flex:1,padding:'13px 0',background:previewValid?'#6366F1':'#E8E5DF',color:previewValid?'#fff':'#A8A29E',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:previewValid?'pointer':'not-allowed'}}>
+          确认补录
+        </button>
+        <button onClick={onClose} style={{flex:1,padding:'13px 0',background:'#F5F4F0',color:'#78716C',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
+          取消
+        </button>
+      </div>
+    </ModalWrap>
+  );
+};
+
+// ── 标签选择器（复用组件）────────────────────────────
+const TagPicker = ({ label, categories, catId, tag, onSelect, color }) => {
+  return (
+    <div>
+      <div style={{fontSize:12,fontWeight:700,color:'#78716C',marginBottom:10}}>{label}
+        <span style={{marginLeft:8,fontSize:12,color,fontWeight:900}}>{tag}</span>
+      </div>
+      <div style={{maxHeight:'30vh',overflowY:'auto'}}>
+        {categories.map((cat, ci) => (
+          <div key={cat.id} style={{marginBottom: ci < categories.length-1 ? 14 : 0}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+              <span style={{fontSize:11}}>{cat.icon}</span>
+              <span style={{fontSize:10,fontWeight:700,color:'#A8A29E',textTransform:'uppercase',letterSpacing:1}}>{cat.name}</span>
+              <div style={{flex:1,height:1,background:'#F5F4F0'}}></div>
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+              {cat.tags.map(t => {
+                const active = tag === t && catId === cat.id;
+                return (
+                  <button key={t} onClick={() => onSelect(t, cat.id)}
+                    style={{padding:'6px 14px',borderRadius:16,fontSize:12,fontWeight:600,border:'none',cursor:'pointer',
+                      background: active ? cat.color : '#F5F4F0',
+                      color: active ? '#fff' : '#57534E',
+                    }}>{t}</button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
@@ -543,7 +814,6 @@ const CatMgrModal = ({ categories, onSave, onClose }) => {
   const [activeCat, setActiveCat] = useState(cats[0]?.id);
   const [newCatName, setNewCatName] = useState('');
   const [newTag, setNewTag] = useState('');
-
   const cat = cats.find(c => c.id === activeCat);
 
   const addCat = () => {
@@ -551,105 +821,74 @@ const CatMgrModal = ({ categories, onSave, onClose }) => {
     const id = 'cat_' + Date.now();
     const icons = ['🎯','⚡','🌟','🔥','💡','🎨'];
     const colors = ['#8B5CF6','#F97316','#06B6D4','#84CC16'];
-    const newCat = { id, name: newCatName.trim(), color: colors[cats.length % colors.length], icon: icons[cats.length % icons.length], tags: [] };
-    setCats(p => [...p, newCat]);
-    setActiveCat(id);
-    setNewCatName('');
-  };
-
-  const deleteCat = (id) => {
-    if (cats.length <= 1) return;
-    const next = cats.find(c => c.id !== id);
-    setCats(p => p.filter(c => c.id !== id));
-    setActiveCat(next?.id);
-  };
-
-  const addTag = () => {
-    if (!newTag.trim() || !cat) return;
-    if (cat.tags.includes(newTag.trim())) return;
-    setCats(p => p.map(c => c.id === activeCat ? { ...c, tags: [...c.tags, newTag.trim()] } : c));
-    setNewTag('');
-  };
-
-  const deleteTag = (tag) => {
-    setCats(p => p.map(c => c.id === activeCat ? { ...c, tags: c.tags.filter(t => t !== tag) } : c));
+    setCats(p => [...p, { id, name: newCatName.trim(), color: colors[p.length%colors.length], icon: icons[p.length%icons.length], tags: [] }]);
+    setActiveCat(id); setNewCatName('');
   };
 
   return (
     <ModalWrap onClose={onClose} tall>
       <div style={{fontSize:17,fontWeight:900,marginBottom:16}}>分类和标签管理</div>
-
-      {/* 分类列表 */}
       <div style={{display:'flex',gap:8,marginBottom:16,overflowX:'auto',paddingBottom:4}}>
         {cats.map(c => (
           <button key={c.id} onClick={() => setActiveCat(c.id)} style={{
-            flexShrink:0, padding:'7px 14px', borderRadius:16, fontSize:12, fontWeight:700, border:'none', cursor:'pointer',
-            background: activeCat===c.id ? c.color : '#F5F4F0',
-            color: activeCat===c.id ? '#fff' : '#78716C',
+            flexShrink:0,padding:'7px 14px',borderRadius:16,fontSize:12,fontWeight:700,border:'none',cursor:'pointer',
+            background: activeCat===c.id ? c.color : '#F5F4F0', color: activeCat===c.id ? '#fff' : '#78716C',
           }}>{c.icon} {c.name}</button>
         ))}
       </div>
-
-      {/* 新增分类 */}
       <div style={{display:'flex',gap:8,marginBottom:16}}>
         <input value={newCatName} onChange={e=>setNewCatName(e.target.value)} placeholder="新分类名称..." onKeyDown={e=>e.key==='Enter'&&addCat()}
           style={{flex:1,padding:'9px 14px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:13,outline:'none',background:'#FAFAF9'}} />
         <button onClick={addCat} style={{padding:'9px 16px',background:'#6366F1',color:'#fff',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>+ 添加</button>
       </div>
-
-      {/* 当前分类的标签 */}
       {cat && (
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
             <div style={{fontSize:13,fontWeight:700,color:'#1C1917'}}>{cat.icon} {cat.name} 的标签</div>
             {cats.length > 1 && (
-              <button onClick={() => deleteCat(cat.id)} style={{fontSize:11,color:'#EF4444',background:'#FEF2F2',padding:'4px 10px',borderRadius:10,border:'none',cursor:'pointer'}}>删除此分类</button>
+              <button onClick={() => { const next = cats.find(c=>c.id!==cat.id); setCats(p=>p.filter(c=>c.id!==cat.id)); setActiveCat(next?.id); }}
+                style={{fontSize:11,color:'#EF4444',background:'#FEF2F2',padding:'4px 10px',borderRadius:10,border:'none',cursor:'pointer'}}>删除此分类</button>
             )}
           </div>
           <div style={{display:'flex',gap:8,marginBottom:12}}>
-            <input value={newTag} onChange={e=>setNewTag(e.target.value)} placeholder="新标签名..." onKeyDown={e=>e.key==='Enter'&&addTag()}
+            <input value={newTag} onChange={e=>setNewTag(e.target.value)} placeholder="新标签名..." onKeyDown={e=>{if(e.key==='Enter'&&newTag.trim()&&!cat.tags.includes(newTag.trim())){setCats(p=>p.map(c=>c.id===activeCat?{...c,tags:[...c.tags,newTag.trim()]}:c));setNewTag('');}}}
               style={{flex:1,padding:'9px 14px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:13,outline:'none',background:'#FAFAF9'}} />
-            <button onClick={addTag} style={{padding:'9px 16px',background:cat.color,color:'#fff',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>+ 添加</button>
+            <button onClick={() => { if(newTag.trim()&&!cat.tags.includes(newTag.trim())){setCats(p=>p.map(c=>c.id===activeCat?{...c,tags:[...c.tags,newTag.trim()]}:c));setNewTag('');} }}
+              style={{padding:'9px 16px',background:cat.color,color:'#fff',borderRadius:14,fontSize:13,fontWeight:700,border:'none',cursor:'pointer'}}>+ 添加</button>
           </div>
-          <div style={{maxHeight:'28vh',overflowY:'auto',display:'flex',flexWrap:'wrap',gap:8}}>
+          <div style={{maxHeight:'25vh',overflowY:'auto',display:'flex',flexWrap:'wrap',gap:8}}>
             {cat.tags.map(tag => (
               <div key={tag} style={{display:'flex',alignItems:'center',gap:4,background:'#F5F4F0',borderRadius:16,padding:'6px 12px'}}>
                 <span style={{fontSize:13,fontWeight:600,color:'#57534E'}}>{tag}</span>
-                <button onClick={() => deleteTag(tag)} style={{color:'#C4B5A5',background:'none',border:'none',cursor:'pointer',fontSize:12,padding:'0 2px'}}>✕</button>
+                <button onClick={() => setCats(p=>p.map(c=>c.id===activeCat?{...c,tags:c.tags.filter(t=>t!==tag)}:c))}
+                  style={{color:'#C4B5A5',background:'none',border:'none',cursor:'pointer',fontSize:12,padding:'0 2px'}}>✕</button>
               </div>
             ))}
-            {cat.tags.length === 0 && <div style={{fontSize:12,color:'#C4B5A5'}}>暂无标签，添加一个吧</div>}
+            {cat.tags.length===0 && <div style={{fontSize:12,color:'#C4B5A5'}}>暂无标签</div>}
           </div>
         </div>
       )}
-
       <div style={{marginTop:20,display:'flex',gap:8}}>
-        <button onClick={() => { onSave(cats); onClose(); }} style={{flex:1,padding:'13px 0',background:'#6366F1',color:'#fff',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
-          保存
-        </button>
-        <button onClick={onClose} style={{flex:1,padding:'13px 0',background:'#F5F4F0',color:'#78716C',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>
-          取消
-        </button>
+        <button onClick={() => { onSave(cats); onClose(); }} style={{flex:1,padding:'13px 0',background:'#6366F1',color:'#fff',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>保存</button>
+        <button onClick={onClose} style={{flex:1,padding:'13px 0',background:'#F5F4F0',color:'#78716C',borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:'pointer'}}>取消</button>
       </div>
     </ModalWrap>
   );
 };
 
-// ── 通用 Modal 包裹 ───────────────────────────────────
+// ── 通用组件 ──────────────────────────────────────────
 const ModalWrap = ({ children, onClose, tall, bottom }) => (
-  <div className="fade-in" style={{position:'fixed',inset:0,background:'rgba(28,25,23,0.75)',display:'flex',alignItems: bottom?'flex-end':'center',justifyContent:'center',padding: bottom?0:24,zIndex:100,backdropFilter:'blur(8px)'}}>
-    <div className="slide-up" style={{background:'#fff',borderRadius: bottom?'28px 28px 0 0':'28px',width:'100%',maxWidth:440,padding:'28px 24px',maxHeight: tall?'90vh':'auto',overflowY: tall?'auto':'visible'}}>
+  <div className="fade-in" onClick={(e)=>{if(e.target===e.currentTarget)onClose();}} style={{position:'fixed',inset:0,background:'rgba(28,25,23,0.75)',display:'flex',alignItems:bottom?'flex-end':'center',justifyContent:'center',padding:bottom?0:24,zIndex:100,backdropFilter:'blur(8px)'}}>
+    <div className="slide-up" style={{background:'#fff',borderRadius:bottom?'28px 28px 0 0':'28px',width:'100%',maxWidth:440,padding:'28px 24px',maxHeight:tall?'90vh':'auto',overflowY:tall?'auto':'visible'}}>
       {children}
     </div>
   </div>
 );
 
-// ── 通用按钮 ─────────────────────────────────────────
-const Btn = ({ children, onClick, color='#6366F1', textColor='#fff', disabled, style }) => (
+const Btn = ({ children, onClick, color='#6366F1', textColor='#fff', disabled }) => (
   <button onClick={onClick} disabled={disabled} className="active-scale" style={{
-    width:'100%', padding:'14px 0', background: disabled ? '#E8E5DF' : color, color: disabled ? '#A8A29E' : textColor,
-    borderRadius:16, fontSize:14, fontWeight:700, border:'none', cursor: disabled?'not-allowed':'pointer',
-    marginBottom:8, ...style,
+    width:'100%',padding:'14px 0',background:disabled?'#E8E5DF':color,color:disabled?'#A8A29E':textColor,
+    borderRadius:16,fontSize:14,fontWeight:700,border:'none',cursor:disabled?'not-allowed':'pointer',marginBottom:8,
   }}>{children}</button>
 );
 
