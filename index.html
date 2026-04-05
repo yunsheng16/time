@@ -276,10 +276,14 @@ const App = () => {
     return cells;
   }, [calYear, calMonth]);
 
-  const getDayLogs = (d) => {
-    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
+  const getLogsByDateKey = (dk) => {
     if (dk === todayKey()) return state.todayLogs;
     return state.allDayLogs[dk] || [];
+  };
+
+  const getDayLogs = (d) => {
+    const dk = new Date(calYear, calMonth, d).toLocaleDateString('zh-CN');
+    return getLogsByDateKey(dk);
   };
 
   const isToday = (d) => new Date(calYear, calMonth, d).toLocaleDateString('zh-CN') === todayKey();
@@ -426,7 +430,14 @@ const App = () => {
                 const isTd = d && isToday(d);
                 const catColors = [...new Set(logs.map(l => l.catId))].slice(0,3).map(getCatColor);
                 return (
-                  <div key={i} onClick={() => { if(d && hasData) { setModalData({d, logs}); setModal('dayDetail'); } }}
+                  <div key={i} onClick={() => {
+                    if (d && hasData) {
+                      const currentDate = new Date(calYear, calMonth, d);
+                      const dateStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth()+1).padStart(2,'0')}-${String(currentDate.getDate()).padStart(2,'0')}`;
+                      setModalData({ d, dateStr, logs: [...logs].sort((a,b) => a.start - b.start) });
+                      setModal('dayDetail');
+                    }
+                  }}
                     style={{aspectRatio:'1',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
                       borderRadius:12,cursor:hasData?'pointer':'default',
                       background: isTd?'#6366F1':hasData?'#F0F0FF':'transparent'}}>
@@ -583,6 +594,7 @@ const App = () => {
       {modal === 'addLog' && (
         <AddLogModal
           categories={state.categories}
+          getLogsByDateKey={getLogsByDateKey}
           onAdd={addManualLog}
           onClose={() => setModal(null)}
         />
@@ -707,7 +719,7 @@ const SplitLogModal = ({ log, idx, categories, onSplit, onClose }) => {
 };
 
 // ── ➕ 手动补录 Modal ─────────────────────────────────
-const AddLogModal = ({ categories, onAdd, onClose }) => {
+const AddLogModal = ({ categories, getLogsByDateKey, onAdd, onClose }) => {
   const [dateStr, setDateStr] = useState(todayDateStr());
   const [startTime, setStartTime] = useState('23:00');
   const [endTime, setEndTime] = useState('07:00');
@@ -722,11 +734,25 @@ const AddLogModal = ({ categories, onAdd, onClose }) => {
   if (endTs <= startTs) endTs += 86400000;
   const ms = endTs - startTs;
   const previewValid = ms > 0 && ms < 30 * 3600000; // 最多30小时
+  const selectedDateKey = new Date(`${dateStr}T00:00:00`).toLocaleDateString('zh-CN');
+  const dayLogs = [...(getLogsByDateKey(selectedDateKey) || [])].sort((a,b) => a.start - b.start);
+  const lastLog = dayLogs.length ? dayLogs[dayLogs.length - 1] : null;
+  const dateTitle = new Date(`${dateStr}T00:00:00`).toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
+
+  useEffect(() => {
+    if (!lastLog) return;
+    const suggestedStart = fmtTime(lastLog.end);
+    setStartTime(suggestedStart);
+
+    const suggestedEndTs = lastLog.end + 60 * 60 * 1000;
+    const suggestedEnd = `${String(new Date(suggestedEndTs).getHours()).padStart(2,'0')}:${String(new Date(suggestedEndTs).getMinutes()).padStart(2,'0')}`;
+    setEndTime(suggestedEnd);
+  }, [dateStr]);
 
   return (
     <ModalWrap onClose={onClose} tall>
-      <div style={{fontSize:17,fontWeight:900,marginBottom:4}}>➕ 手动补录记录</div>
-      <div style={{fontSize:12,color:'#A8A29E',marginBottom:20}}>用于补录睡眠、或漏记的时间段</div>
+      <div style={{fontSize:17,fontWeight:900,marginBottom:4}}>补录记录</div>
+      <div style={{fontSize:12,color:'#A8A29E',marginBottom:18}}>先看这一天已经记录到哪里，再补后面的空档</div>
 
       {/* 日期 */}
       <div style={{marginBottom:16}}>
@@ -735,7 +761,36 @@ const AddLogModal = ({ categories, onAdd, onClose }) => {
           style={{width:'100%',padding:'12px 16px',borderRadius:14,border:'1px solid #E8E5DF',fontSize:14,outline:'none',background:'#FAFAF9'}} />
       </div>
 
-      {/* 时间段 */}
+      <div style={{background:'#FAF8F4',borderRadius:22,padding:'18px 16px',marginBottom:18}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:4}}>
+          <div style={{fontSize:18,fontWeight:900,color:'#1C1917'}}>{dateTitle}</div>
+          <div style={{fontSize:11,color:'#A8A29E'}}>{dayLogs.length} 条记录</div>
+        </div>
+        <div style={{fontSize:11,color:'#A8A29E',marginBottom:12}}>
+          {lastLog ? `当前已记录到 ${fmtTimeFull(lastLog.end)}` : '当天还没有记录，可以从任意时间开始补录'}
+        </div>
+        {dayLogs.length > 0 && (
+          <div style={{maxHeight:'26vh',overflowY:'auto'}}>
+            {dayLogs.map((log, i) => {
+              const color = categories.find(c => c.id === log.catId)?.color || '#94A3B8';
+              return (
+                <div key={log.id || i} style={{display:'flex',gap:10,alignItems:'center',padding:'10px 0',borderBottom:i === dayLogs.length - 1 ? 'none' : '1px solid #EEE7DC'}}>
+                  <div style={{width:4,height:38,borderRadius:4,background:color,flexShrink:0}}></div>
+                  <div style={{flex:1}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:3,flexWrap:'wrap'}}>
+                      <span style={{fontSize:11,fontWeight:700,color,background:color+'18',padding:'2px 7px',borderRadius:7}}>{log.tag}</span>
+                      {log.manual && <span style={{fontSize:9,color:'#A8A29E',background:'#fff',padding:'1px 5px',borderRadius:4}}>补录</span>}
+                      <span className="mono" style={{fontSize:10,color:'#C4B5A5'}}>{fmtTime(log.start)}-{fmtTime(log.end)}</span>
+                    </div>
+                    <div className="mono" style={{fontSize:18,fontWeight:500,color:'#1C1917'}}>{log.durationStr}</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div style={{marginBottom:16}}>
         <div style={{fontSize:12,fontWeight:700,color:'#78716C',marginBottom:8}}>时间段</div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
